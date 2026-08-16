@@ -17,6 +17,7 @@ import fcntl
 import json
 import os
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -64,7 +65,7 @@ DEFAULT_CONFIG = {
     },
     "transcription": {"backend": "local", "model": "large-v3-turbo", "lang": "en"},
     "llm": {"source": "system"},
-    "notify": {"desktop": True},
+    "notify": {"desktop": True, "joinReminderMin": 5},
     "audit": {"nightly": True, "alertOnMiss": True},
     "retainAudio": False,
     "minFreeDiskMB": 2048,
@@ -139,10 +140,55 @@ def run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
 def notify(title: str, body: str, urgent: bool = False) -> None:
     if not config()["notify"]["desktop"] or not which("notify-send"):
         return
-    args = ["notify-send", "-a", "Meetings"]
+    args = ["notify-send", "-a", "OmaMeet"]
     if urgent:
         args += ["-u", "critical"]
     run(args + [title, body], timeout=5)
+
+
+def queue_join_reminder(event: dict) -> bool:
+    """Queue exactly one actionable reminder per calendar event."""
+    event_id = event.get("id") or event.get("event_id")
+    if not event_id or not event.get("joinUrl") or not which("notify-send"):
+        return False
+    reminders = STATE_DIR / "reminders"
+    reminders.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", str(event_id))[:120]
+    marker = reminders / f"{safe}.json"
+    try:
+        fd = os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump({"queued": iso(now()), "event": event}, handle)
+    except FileExistsError:
+        return False
+    title = event.get("title") or "Meeting"
+    start = event.get("start") or ""
+    time_label = start[11:16] if len(start) >= 16 else "soon"
+    native = which("omarchy-notification-send")
+    if native:
+        action = (f"{shlex.quote(sys.argv[0])} join-reminder --marker "
+                  f"{shlex.quote(str(marker))}")
+        run([native, "--exec", action, "--app-name", "OmaMeet", "-g", "\uf274",
+             "-u", "normal", "Meeting in 5 minutes  ·  JOIN ›",
+             f"{time_label}  {title} · Click to join", "-t", "300000"], timeout=5)
+    else:
+        notify("Meeting in 5 minutes", f"{time_label}  {title} · Open OmaMeet to join")
+    return True
+
+
+def cmd_join_reminder(args) -> None:
+    """Honor a persisted Omarchy notification click."""
+    payload = read_json(Path(args.marker)) or {}
+    event = payload.get("event") or {}
+    title = event.get("title") or "Meeting"
+    url = event.get("joinUrl") or ""
+    if not re.match(r"^https://", url, re.I):
+        fail("reminder has no valid HTTPS meeting URL")
+    sess = session()
+    if not sess:
+        start_recording(config(), title, event)
+    subprocess.Popen(["xdg-open", url], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def fail(message: str, code: int = 1, notify_user: bool = True):
@@ -1070,6 +1116,9 @@ def cmd_tick(args) -> None:
     agenda = calendar_agenda()
     event = None
     if agenda and cfg["detection"].get("calendarPoll", True):
+        for reminder in A.reminder_events(agenda.get("events", []), cfg, qualifies, tick_now):
+            if queue_join_reminder(reminder):
+                actions.append("remind:" + str(reminder.get("id") or "meeting"))
         event = A.due_event(agenda.get("events", []), cfg, qualifies, tick_now)
 
     if event:
@@ -1344,6 +1393,10 @@ def build_parser() -> argparse.ArgumentParser:
     join.add_argument("--url", required=True)
     join.add_argument("--event-json", required=True)
     join.set_defaults(func=cmd_join)
+
+    reminder = add("join-reminder", help=argparse.SUPPRESS)
+    reminder.add_argument("--marker", required=True)
+    reminder.set_defaults(func=cmd_join_reminder)
 
     pause = add("pause", help="disable auto-recording")
     pause.add_argument("--off", action="store_true", help="resume")

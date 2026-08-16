@@ -121,6 +121,24 @@ def due_event(events: list[dict], cfg, qualifies, now: datetime) -> dict | None:
     return None
 
 
+def reminder_events(events: list[dict], cfg, qualifies, now: datetime) -> list[dict]:
+    """Qualifying meetings beginning inside the configured reminder window."""
+    minutes = int(cfg.get("notify", {}).get("joinReminderMin", 5))
+    window = timedelta(minutes=max(1, minutes))
+    output = []
+    for event in events:
+        ok, _ = qualifies(event, cfg)
+        if not ok:
+            continue
+        try:
+            start = datetime.fromisoformat(event["start"])
+        except (KeyError, ValueError):
+            continue
+        if now <= start <= now + window:
+            output.append(event)
+    return output
+
+
 # ---------------------------------------------------------------------------
 # silence-based auto-stop
 # ---------------------------------------------------------------------------

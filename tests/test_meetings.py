@@ -217,6 +217,12 @@ class HelperTest(unittest.TestCase):
         self.assertIn('sess["capture_client_seen_at"]', source)
         self.assertIn('reason = "app_exit"', source)
 
+    def test_join_reminder_uses_persistent_omarchy_click_action(self):
+        source = HELPER.read_text()
+        self.assertIn('which("omarchy-notification-send")', source)
+        self.assertIn('"--exec", action', source)
+        self.assertIn('"join-reminder", help=argparse.SUPPRESS', source)
+
     def test_capture_backend_is_ffmpeg_not_pw_record(self):
         """pw-record writes correctly-sized files full of silence."""
         self.assertEqual(self.mod.DEFAULT_CONFIG["audio"]["backend"], "ffmpeg-pulse")
@@ -531,6 +537,30 @@ class AutopilotTest(unittest.TestCase):
                  "end": (start + timedelta(hours=1)).isoformat()}
         self.assertIsNone(
             self.a.due_event([event], self.cfg(), self.qualifies, now))
+
+    def test_reminds_five_minutes_before_meeting(self):
+        from datetime import datetime, timedelta
+        now = datetime.now().astimezone()
+        start = now + timedelta(minutes=4)
+        event = {"id": "reminder-1", "title": "Sync",
+                 "joinUrl": "https://meet.google.com/x",
+                 "start": start.isoformat(),
+                 "end": (start + timedelta(hours=1)).isoformat()}
+        self.assertEqual(
+            self.a.reminder_events([event], self.cfg(), self.qualifies, now), [event])
+
+    def test_does_not_remind_too_early_or_after_start(self):
+        from datetime import datetime, timedelta
+        now = datetime.now().astimezone()
+        events = []
+        for offset in (-1, 6):
+            start = now + timedelta(minutes=offset)
+            events.append({"id": str(offset), "title": "Sync",
+                           "joinUrl": "https://meet.google.com/x",
+                           "start": start.isoformat(),
+                           "end": (start + timedelta(hours=1)).isoformat()})
+        self.assertEqual(
+            self.a.reminder_events(events, self.cfg(), self.qualifies, now), [])
 
     def test_stays_armed_for_late_start(self):
         """A meeting that began 20 minutes ago must still be captured."""

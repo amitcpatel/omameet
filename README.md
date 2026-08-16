@@ -8,6 +8,8 @@ AI summaries, action items, and Obsidian notes.
 
 - The themed day view aggregates multiple Google Calendar accounts.
 - Clicking **Join** starts capture before opening Google Meet, Zoom, Teams, or Webex.
+- Five minutes before a qualifying meeting, OmaMeet shows a one-time desktop
+  notification with a **Join** action.
 - The background service also catches qualifying scheduled and unplanned calls.
 - After a recognized meeting app stops capturing the microphone for 90 seconds,
   OmaMeet stops and processes the recording. Five minutes of silence is the
