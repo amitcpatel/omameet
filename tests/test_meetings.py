@@ -122,6 +122,12 @@ class ThemeComplianceTest(unittest.TestCase):
         self.assertIn("root.controller.show()", source)
         self.assertIn("root.controller.hide()", source)
 
+    def test_calendar_join_starts_capture_before_opening_url(self):
+        source = (QML_DIR / "Panel.qml").read_text()
+        self.assertIn('function joinMeeting(event)', source)
+        self.assertIn('meetingsHelper, "join"', source)
+        self.assertIn('onClicked: root.joinMeeting(modelData)', source)
+
 
 class UrlInstallTest(unittest.TestCase):
     """`omarchy plugin add <git-url>` runs NO install hooks.
@@ -204,6 +210,12 @@ class HelperTest(unittest.TestCase):
     def test_auto_record_unplanned_defaults_false(self):
         """Silently recording is worse than missing a meeting."""
         self.assertFalse(self.mod.DEFAULT_CONFIG["detection"]["autoRecordUnplanned"])
+
+    def test_meeting_app_exit_has_a_grace_period(self):
+        self.assertEqual(self.mod.DEFAULT_CONFIG["capture"]["appExitGraceSec"], 90)
+        source = HELPER.read_text()
+        self.assertIn('sess["capture_client_seen_at"]', source)
+        self.assertIn('reason = "app_exit"', source)
 
     def test_capture_backend_is_ffmpeg_not_pw_record(self):
         """pw-record writes correctly-sized files full of silence."""
