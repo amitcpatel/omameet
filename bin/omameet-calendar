@@ -1,0 +1,510 @@
+#!/usr/bin/env python3
+"""OAuth and Google Calendar helper for the Omarchy Calendar plugin."""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import http.server
+import json
+import os
+import re
+import secrets
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+import webbrowser
+import time as time_module
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import date, datetime, time, timedelta
+from pathlib import Path
+
+APP = "omarchy-calendar"
+SCOPE = "openid email https://www.googleapis.com/auth/calendar.readonly"
+CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
+STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / APP
+CLIENT_FILE = CONFIG / "client_secret.json"
+ACCOUNTS_FILE = STATE / "accounts.json"
+PREFERENCES_FILE = STATE / "preferences.json"
+CACHE_DIR = STATE / "agenda-cache"
+CACHE_TTL_SECONDS = 300
+URL_RE = re.compile(r"https://(?:meet\.google\.com|[\w.-]*zoom\.us|teams\.microsoft\.com|[\w.-]*webex\.com)/[^\s<>\"]+", re.I)
+PRIORITIES = ("family", "work", "normal", "informational")
+
+
+def request_json(url: str, token: str | None = None, data: dict | None = None) -> dict:
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if body:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    request = urllib.request.Request(url, body, headers)
+    with urllib.request.urlopen(request, timeout=20) as response:
+        return json.load(response)
+
+
+def client_config() -> dict:
+    try:
+        raw = json.loads(CLIENT_FILE.read_text())
+        return raw.get("installed") or raw["web"]
+    except (OSError, KeyError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"Invalid or missing OAuth credentials at {CLIENT_FILE}: {exc}")
+
+
+def accounts() -> list[dict]:
+    try:
+        return json.loads(ACCOUNTS_FILE.read_text()).get("accounts", [])
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def save_accounts(items: list[dict]) -> None:
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = ACCOUNTS_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps({"accounts": items}, indent=2) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(ACCOUNTS_FILE)
+    invalidate_cache()
+
+
+def preferences() -> dict:
+    try:
+        raw = json.loads(PREFERENCES_FILE.read_text())
+        return raw if isinstance(raw, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_preferences(value: dict) -> None:
+    STATE.mkdir(parents=True, exist_ok=True, mode=0o700)
+    temporary = PREFERENCES_FILE.with_suffix(".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(PREFERENCES_FILE)
+    invalidate_cache()
+
+
+def invalidate_cache() -> None:
+    if not CACHE_DIR.exists():
+        return
+    for path in CACHE_DIR.glob("*.json"):
+        path.unlink(missing_ok=True)
+
+
+def cache_path(day: date) -> Path:
+    return CACHE_DIR / f"{day.isoformat()}.json"
+
+
+def read_cached_agenda(day: date) -> dict | None:
+    path = cache_path(day)
+    try:
+        if time_module.time() - path.stat().st_mtime > CACHE_TTL_SECONDS:
+            return None
+        payload = json.loads(path.read_text())
+        return payload if isinstance(payload, dict) else None
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def write_cached_agenda(day: date, payload: dict) -> None:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = cache_path(day)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, ensure_ascii=False) + "\n")
+    temporary.chmod(0o600)
+    temporary.replace(path)
+
+
+def calendar_enabled(account_id: str, calendar_id: str, prefs: dict | None = None) -> bool:
+    prefs = preferences() if prefs is None else prefs
+    return prefs.get("calendars", {}).get(account_id, {}).get(calendar_id, True) is not False
+
+
+def set_calendar_enabled(account_id: str, calendar_id: str, enabled: bool) -> None:
+    prefs = preferences()
+    prefs.setdefault("calendars", {}).setdefault(account_id, {})[calendar_id] = enabled
+    save_preferences(prefs)
+
+
+def calendar_priority(account_id: str, calendar_id: str, prefs: dict | None = None) -> str:
+    prefs = preferences() if prefs is None else prefs
+    value = prefs.get("priorities", {}).get(account_id, {}).get(calendar_id, "normal")
+    return value if value in PRIORITIES else "normal"
+
+
+def set_calendar_priority(account_id: str, calendar_id: str, priority: str) -> None:
+    if priority not in PRIORITIES:
+        raise ValueError(f"unsupported calendar priority: {priority}")
+    prefs = preferences()
+    prefs.setdefault("priorities", {}).setdefault(account_id, {})[calendar_id] = priority
+    save_preferences(prefs)
+
+
+def set_account_calendars_enabled(account_id: str, calendar_ids: list[str], enabled: bool) -> None:
+    prefs = preferences()
+    account_prefs = prefs.setdefault("calendars", {}).setdefault(account_id, {})
+    for calendar_id in calendar_ids:
+        account_prefs[calendar_id] = enabled
+    save_preferences(prefs)
+
+
+def store_token(account_id: str, token: str) -> None:
+    subprocess.run(
+        ["secret-tool", "store", "--label", f"Omarchy Calendar: {account_id}", "application", APP, "account", account_id],
+        input=token, text=True, check=True,
+    )
+
+
+def load_token(account_id: str) -> str:
+    result = subprocess.run(
+        ["secret-tool", "lookup", "application", APP, "account", account_id],
+        text=True, capture_output=True, check=True,
+    )
+    if not result.stdout.strip():
+        raise RuntimeError("refresh token missing from keyring")
+    return result.stdout.strip()
+
+
+def access_token(account: dict) -> str:
+    cfg = client_config()
+    response = request_json(cfg["token_uri"], data={
+        "client_id": cfg["client_id"],
+        "client_secret": cfg.get("client_secret", ""),
+        "refresh_token": load_token(account["id"]),
+        "grant_type": "refresh_token",
+    })
+    return response["access_token"]
+
+
+class OAuthHandler(http.server.BaseHTTPRequestHandler):
+    result: dict = {}
+    expected_state = ""
+
+    def do_GET(self) -> None:
+        params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if params.get("state", [""])[0] != self.expected_state:
+            type(self).result = {"error": "OAuth state mismatch"}
+            status = 400
+        elif "error" in params:
+            type(self).result = {"error": params["error"][0]}
+            status = 400
+        else:
+            type(self).result = {"code": params.get("code", [""])[0]}
+            status = 200
+        message = b"Authorization received. You can close this tab and return to Omarchy."
+        self.send_response(status)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(message)))
+        self.end_headers()
+        self.wfile.write(message)
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+def add_account() -> None:
+    cfg = client_config()
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(48)).rstrip(b"=").decode()
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=").decode()
+    state = secrets.token_urlsafe(24)
+    OAuthHandler.expected_state = state
+    OAuthHandler.result = {}
+    with http.server.HTTPServer(("127.0.0.1", 0), OAuthHandler) as server:
+        redirect = f"http://127.0.0.1:{server.server_port}"
+        query = urllib.parse.urlencode({
+            "client_id": cfg["client_id"], "redirect_uri": redirect,
+            "response_type": "code", "scope": SCOPE, "access_type": "offline",
+            "prompt": "consent select_account", "state": state,
+            "code_challenge": challenge, "code_challenge_method": "S256",
+        })
+        webbrowser.open(f"{cfg['auth_uri']}?{query}")
+        print("Complete authorization in your browser…", file=sys.stderr)
+        server.handle_request()
+    if "error" in OAuthHandler.result:
+        raise SystemExit(f"Authorization failed: {OAuthHandler.result['error']}")
+    tokens = request_json(cfg["token_uri"], data={
+        "client_id": cfg["client_id"], "client_secret": cfg.get("client_secret", ""),
+        "code": OAuthHandler.result["code"], "code_verifier": verifier,
+        "grant_type": "authorization_code", "redirect_uri": redirect,
+    })
+    profile = request_json("https://www.googleapis.com/oauth2/v2/userinfo", tokens["access_token"])
+    account_id = profile["id"]
+    store_token(account_id, tokens["refresh_token"])
+    items = [item for item in accounts() if item["id"] != account_id]
+    items.append({"id": account_id, "email": profile.get("email", account_id), "enabled": True})
+    save_accounts(items)
+    print(f"Added {profile.get('email', account_id)}")
+
+
+def api_pages(url: str, token: str) -> list[dict]:
+    items: list[dict] = []
+    while url:
+        response = request_json(url, token)
+        items.extend(response.get("items", []))
+        page = response.get("nextPageToken")
+        url = url + ("&" if "?" in url else "?") + urllib.parse.urlencode({"pageToken": page}) if page else ""
+    return items
+
+
+def google_calendars(token: str) -> list[dict]:
+    return api_pages("https://www.googleapis.com/calendar/v3/users/me/calendarList?minAccessRole=reader&showHidden=true", token)
+
+
+def calendar_events(token: str, day: date, calendars: list[dict]) -> list[dict]:
+    zone = datetime.now().astimezone().tzinfo
+    start = datetime.combine(day, time.min, zone).isoformat()
+    end = datetime.combine(day + timedelta(days=1), time.min, zone).isoformat()
+    output: list[dict] = []
+    for calendar in calendars:
+        params = urllib.parse.urlencode({"timeMin": start, "timeMax": end, "singleEvents": "true", "orderBy": "startTime", "maxResults": 100})
+        url = "https://www.googleapis.com/calendar/v3/calendars/" + urllib.parse.quote(calendar["id"], safe="") + "/events?" + params
+        for event in api_pages(url, token):
+            event["_calendar"] = {
+                "id": calendar["id"],
+                "label": calendar.get("summaryOverride") or calendar.get("summary", ""),
+                "color": calendar.get("backgroundColor", ""),
+                "priority": calendar.get("priority", "normal"),
+            }
+            output.append(event)
+    return output
+
+
+def list_calendars() -> dict:
+    prefs = preferences()
+    result = {"calendars": [], "errors": []}
+    for account in [item for item in accounts() if item.get("enabled", True)]:
+        try:
+            for calendar in google_calendars(access_token(account)):
+                calendar_id = calendar["id"]
+                result["calendars"].append({
+                    "accountId": account["id"],
+                    "accountLabel": account.get("email", account["id"]),
+                    "calendarId": calendar_id,
+                    "calendarLabel": calendar.get("summaryOverride") or calendar.get("summary") or calendar_id,
+                    "primary": calendar.get("primary", False),
+                    "enabled": calendar_enabled(account["id"], calendar_id, prefs),
+                    "priority": calendar_priority(account["id"], calendar_id, prefs),
+                })
+        except Exception as exc:
+            result["errors"].append({"accountId": account["id"], "message": str(exc)})
+    result["calendars"].sort(key=lambda item: (item["accountLabel"].lower(), not item["primary"], item["calendarLabel"].lower()))
+    return result
+
+
+def meeting_url(event: dict) -> str:
+    for entry in event.get("conferenceData", {}).get("entryPoints", []):
+        uri = str(entry.get("uri", ""))
+        if entry.get("entryPointType") == "video" and uri.startswith("https://"):
+            return uri
+    if str(event.get("hangoutLink", "")).startswith("https://"):
+        return event["hangoutLink"]
+    match = URL_RE.search(" ".join([str(event.get("location", "")), str(event.get("description", ""))]))
+    return match.group(0).rstrip(".,);]") if match else ""
+
+
+def person(raw: dict) -> dict:
+    """Normalize a Google attendee/organizer object."""
+    if not isinstance(raw, dict):
+        return {}
+    email = str(raw.get("email", ""))
+    out = {
+        "email": email,
+        "displayName": raw.get("displayName") or (email.split("@")[0] if email else ""),
+        "responseStatus": raw.get("responseStatus", "needsAction"),
+    }
+    for flag in ("organizer", "self", "optional", "resource"):
+        if raw.get(flag):
+            out[flag] = True
+    return out
+
+
+def attendees(event: dict) -> list:
+    return [person(a) for a in (event.get("attendees") or []) if isinstance(a, dict)]
+
+
+def normalize(event: dict, account: dict, now: datetime) -> dict:
+    start_raw, end_raw = event.get("start", {}), event.get("end", {})
+    all_day = "date" in start_raw
+    if all_day:
+        start = datetime.combine(date.fromisoformat(start_raw["date"]), time.min, now.tzinfo)
+        end = datetime.combine(date.fromisoformat(end_raw["date"]), time.min, now.tzinfo)
+        label = "All day"
+    else:
+        start = datetime.fromisoformat(start_raw["dateTime"].replace("Z", "+00:00")).astimezone()
+        end = datetime.fromisoformat(end_raw["dateTime"].replace("Z", "+00:00")).astimezone()
+        label = start.strftime("%-I:%M %p")
+    calendar = event.get("_calendar", {})
+    return {
+        "id": event.get("id", ""), "title": event.get("summary") or "(Untitled)",
+        "start": start.isoformat(), "end": end.isoformat(), "timeLabel": label,
+        "allDay": all_day, "isNow": start <= now < end,
+        "accountId": account["id"], "accountLabel": account.get("email", account["id"]),
+        "calendarId": calendar.get("id", ""), "calendarLabel": calendar.get("label", ""),
+        "priority": calendar.get("priority", "normal"),
+        "color": calendar.get("color", ""), "joinUrl": meeting_url(event),
+        "htmlLink": event.get("htmlLink", ""),
+        "attendees": attendees(event),
+        "organizer": person(event.get("organizer") or {}),
+        "creator": person(event.get("creator") or {}),
+        "description": event.get("description", ""),
+        "location": event.get("location", ""),
+        "recurringEventId": event.get("recurringEventId", ""),
+        "status": event.get("status", "confirmed"),
+        "guestCount": len(event.get("attendees") or []),
+    }
+
+
+def build_agenda(day: date) -> dict:
+    now = datetime.now().astimezone()
+    result = {"date": day.isoformat(), "generatedAt": now.isoformat(), "accounts": [], "events": [], "errors": []}
+    tasks = []
+    for account in [item for item in accounts() if item.get("enabled", True)]:
+        result["accounts"].append({"id": account["id"], "label": account.get("email", account["id"])})
+        try:
+            token = access_token(account)
+            visible = []
+            prefs = preferences()
+            for calendar in google_calendars(token):
+                if not calendar_enabled(account["id"], calendar["id"], prefs):
+                    continue
+                calendar = dict(calendar)
+                calendar["priority"] = calendar_priority(account["id"], calendar["id"], prefs)
+                visible.append(calendar)
+            for calendar in visible:
+                tasks.append((account, token, calendar))
+        except Exception as exc:
+            result["errors"].append({"accountId": account["id"], "message": str(exc)})
+
+    if tasks:
+        with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as executor:
+            pending = {
+                executor.submit(calendar_events, token, day, [calendar]): (account, calendar)
+                for account, token, calendar in tasks
+            }
+            for future in as_completed(pending):
+                account, calendar = pending[future]
+                try:
+                    result["events"].extend(normalize(event, account, now) for event in future.result())
+                except Exception as exc:
+                    result["errors"].append({
+                        "accountId": account["id"],
+                        "calendarId": calendar["id"],
+                        "message": str(exc),
+                    })
+    unique = {(event["accountId"], event["calendarId"], event["id"]): event for event in result["events"]}
+    result["events"] = sorted(unique.values(), key=lambda item: (not item["allDay"], item["start"], item["title"].lower()))
+    apply_overlap_layout(result["events"])
+    return result
+
+
+def agenda(day: date, force: bool = False) -> dict:
+    if not force:
+        cached = read_cached_agenda(day)
+        if cached is not None:
+            cached["cacheHit"] = True
+            return cached
+    result = build_agenda(day)
+    result["cacheHit"] = False
+    if not result["errors"]:
+        write_cached_agenda(day, result)
+    return result
+
+
+def prefetch(center: date, days: int) -> None:
+    for offset in range(-days, days + 1):
+        if offset == 0:
+            continue
+        agenda(center + timedelta(days=offset))
+
+
+def apply_overlap_layout(events: list[dict]) -> None:
+    timed = [event for event in events if not event.get("allDay")]
+    group: list[dict] = []
+    group_end: datetime | None = None
+
+    def finish() -> None:
+        if not group:
+            return
+        column_ends: list[datetime] = []
+        for event in group:
+            start = datetime.fromisoformat(event["start"])
+            end = datetime.fromisoformat(event["end"])
+            column = next((index for index, value in enumerate(column_ends) if value <= start), len(column_ends))
+            if column == len(column_ends):
+                column_ends.append(end)
+            else:
+                column_ends[column] = end
+            event["overlapColumn"] = column
+        columns = max(1, len(column_ends))
+        for event in group:
+            event["overlapColumns"] = columns
+
+    for event in timed:
+        start = datetime.fromisoformat(event["start"])
+        end = datetime.fromisoformat(event["end"])
+        if group and group_end is not None and start >= group_end:
+            finish()
+            group = []
+            group_end = None
+        group.append(event)
+        group_end = end if group_end is None else max(group_end, end)
+    finish()
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="omarchy-calendar")
+    commands = parser.add_subparsers(dest="command", required=True)
+    account = commands.add_parser("account")
+    account_commands = account.add_subparsers(dest="account_command", required=True)
+    account_commands.add_parser("add")
+    account_commands.add_parser("list")
+    calendar = commands.add_parser("calendar")
+    calendar_commands = calendar.add_subparsers(dest="calendar_command", required=True)
+    calendar_commands.add_parser("list")
+    calendar_set = calendar_commands.add_parser("set")
+    calendar_set.add_argument("account_id")
+    calendar_set.add_argument("calendar_id")
+    calendar_set.add_argument("enabled", choices=("true", "false"))
+    calendar_priority_parser = calendar_commands.add_parser("priority")
+    calendar_priority_parser.add_argument("account_id")
+    calendar_priority_parser.add_argument("calendar_id")
+    calendar_priority_parser.add_argument("priority", choices=PRIORITIES)
+    calendar_account = calendar_commands.add_parser("set-account")
+    calendar_account.add_argument("account_id")
+    calendar_account.add_argument("enabled", choices=("true", "false"))
+    calendar_account.add_argument("calendar_ids", nargs="+")
+    agenda_parser = commands.add_parser("agenda")
+    agenda_parser.add_argument("--date", default=date.today().isoformat())
+    agenda_parser.add_argument("--json", action="store_true")
+    agenda_parser.add_argument("--refresh", action="store_true")
+    prefetch_parser = commands.add_parser("prefetch")
+    prefetch_parser.add_argument("--date", default=date.today().isoformat())
+    prefetch_parser.add_argument("--days", type=int, default=2)
+    args = parser.parse_args()
+    if args.command == "account" and args.account_command == "add":
+        add_account()
+    elif args.command == "account":
+        print(json.dumps({"accounts": accounts()}, indent=2))
+    elif args.command == "calendar" and args.calendar_command == "list":
+        print(json.dumps(list_calendars(), indent=2))
+    elif args.command == "calendar" and args.calendar_command == "set":
+        set_calendar_enabled(args.account_id, args.calendar_id, args.enabled == "true")
+        print(json.dumps({"accountId": args.account_id, "calendarId": args.calendar_id, "enabled": args.enabled == "true"}))
+    elif args.command == "calendar" and args.calendar_command == "priority":
+        set_calendar_priority(args.account_id, args.calendar_id, args.priority)
+        print(json.dumps({"accountId": args.account_id, "calendarId": args.calendar_id, "priority": args.priority}))
+    elif args.command == "calendar":
+        enabled = args.enabled == "true"
+        set_account_calendars_enabled(args.account_id, args.calendar_ids, enabled)
+        print(json.dumps({"accountId": args.account_id, "calendarIds": args.calendar_ids, "enabled": enabled}))
+    elif args.command == "agenda":
+        print(json.dumps(agenda(date.fromisoformat(args.date), force=args.refresh), indent=2))
+    elif args.command == "prefetch":
+        prefetch(date.fromisoformat(args.date), max(0, min(args.days, 7)))
+
+
+if __name__ == "__main__":
+    main()

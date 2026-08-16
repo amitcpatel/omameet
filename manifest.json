@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "id": "acp.omameet",
+  "name": "OmaMeet",
+  "version": "0.1.0",
+  "author": "Amit Patel",
+  "license": "MIT",
+  "description": "Calendar, one-click joining, automatic meeting capture, transcription, summaries, and tasks.",
+  "kinds": [
+    "bar-widget",
+    "service"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaMeet",
+    "description": "Calendar, meeting capture, transcripts, summaries, and tasks",
+    "category": "Productivity",
+    "aliases": [
+      "calendar",
+      "agenda",
+      "meetings",
+      "recording",
+      "transcription"
+    ],
+    "allowMultiple": false,
+    "defaults": {
+      "refreshIntervalSec": 300,
+      "pollIntervalSec": 15,
+      "appExitGraceSec": 90
+    },
+    "schema": [
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval (seconds)",
+        "min": 60,
+        "max": 3600,
+        "step": 60,
+        "defaultValue": 300
+      },
+      {
+        "key": "pollIntervalSec",
+        "type": "integer",
+        "label": "Meeting detector interval (seconds)",
+        "min": 15,
+        "max": 60,
+        "step": 15,
+        "defaultValue": 15
+      },
+      {
+        "key": "appExitGraceSec",
+        "type": "integer",
+        "label": "Stop after meeting app exits (seconds)",
+        "min": 30,
+        "max": 300,
+        "step": 15,
+        "defaultValue": 90
+      }
+    ]
+  }
+}

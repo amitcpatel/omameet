@@ -1,0 +1,1408 @@
+#!/usr/bin/env python3
+"""omarchy-meetings — agent-first meeting intelligence for Omarchy.
+
+Python 3 standard library only. The CLI is the agent API: every read command
+supports --json.
+
+Design rules enforced here:
+  * Audio is NEVER deleted unless transcription+notes verifiably succeeded.
+  * Silence is a failure, not a success. Exit codes and file sizes both lie.
+  * Never invent an owner or a due date.
+  * Fail loud: non-zero exit + notification on every failure path.
+"""
+from __future__ import annotations
+
+import argparse
+import fcntl
+import json
+import os
+import shutil
+import signal
+import subprocess
+import sys
+import time
+import wave
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+APP = "omarchy-meetings"
+VERSION = "0.2.0"
+
+# lib/ ships alongside bin/ inside the plugin folder
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
+STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / APP
+CONFIG_FILE = CONFIG_DIR / "config.json"
+SESSION_FILE = STATE_DIR / "session.json"
+HEARTBEAT_FILE = STATE_DIR / "heartbeat"
+RECORDINGS_DIR = STATE_DIR / "recordings"
+
+# Minimum dBFS peak below which a capture is considered dead air.
+SILENCE_FLOOR_DB = -80.0
+
+DEFAULT_CONFIG = {
+    "vault": {"path": "~/Projects/Knowledge/Meetings"},
+    "capture": {
+        "lookaheadSec": 300,
+        "requireLink": True,
+        "skipTitles": ["Focus", "Block", "Lunch", "Hold"],
+        "skipAllDay": True,
+        "minDurationMin": 10,
+        "silenceStopSec": 300,
+        "appExitGraceSec": 90,
+    },
+    "audio": {"mic": "auto", "system": "auto-monitor", "codec": "opus", "backend": "ffmpeg-pulse"},
+    "detection": {
+        "calendarPoll": True,
+        "audioActivity": True,
+        "autoRecordUnplanned": False,
+        "unplannedPromptTimeoutSec": 15,
+        "knownMeetingApps": ["zoom", "chrome", "chromium", "teams", "slack",
+                             "firefox", "webex", "discord", "element"],
+        "appDenylist": [],
+    },
+    "transcription": {"backend": "local", "model": "large-v3-turbo", "lang": "en"},
+    "llm": {"source": "system"},
+    "notify": {"desktop": True},
+    "audit": {"nightly": True, "alertOnMiss": True},
+    "retainAudio": False,
+    "minFreeDiskMB": 2048,
+}
+
+
+# --------------------------------------------------------------------------
+# small helpers
+# --------------------------------------------------------------------------
+
+def now() -> datetime:
+    return datetime.now().astimezone()
+
+
+def iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+def deep_merge(base: dict, override: dict) -> dict:
+    out = dict(base)
+    for key, value in (override or {}).items():
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_merge(out[key], value)
+        else:
+            out[key] = value
+    return out
+
+
+def config() -> dict:
+    try:
+        raw = json.loads(CONFIG_FILE.read_text())
+    except (OSError, ValueError):
+        raw = {}
+    return deep_merge(DEFAULT_CONFIG, raw)
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmp = CONFIG_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+    tmp.replace(CONFIG_FILE)
+
+
+def write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2) + "\n")
+    tmp.replace(path)
+
+
+def read_json(path: Path, default=None):
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
+        return default
+
+
+def which(name: str) -> str | None:
+    return shutil.which(name)
+
+
+def run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except FileNotFoundError:
+        return 127, "", f"not found: {cmd[0]}"
+    except subprocess.TimeoutExpired:
+        return 124, "", "timeout"
+
+
+def notify(title: str, body: str, urgent: bool = False) -> None:
+    if not config()["notify"]["desktop"] or not which("notify-send"):
+        return
+    args = ["notify-send", "-a", "Meetings"]
+    if urgent:
+        args += ["-u", "critical"]
+    run(args + [title, body], timeout=5)
+
+
+def fail(message: str, code: int = 1, notify_user: bool = True):
+    """Fail loud: stderr + desktop notification + non-zero exit."""
+    print(f"error: {message}", file=sys.stderr)
+    if notify_user:
+        notify("Meetings: failure", message, urgent=True)
+    sys.exit(code)
+
+
+def emit(payload, as_json: bool, human=None) -> None:
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    elif human is not None:
+        print(human)
+    else:
+        print(json.dumps(payload, indent=2))
+
+
+# --------------------------------------------------------------------------
+# audio device resolution — always at runtime, never hardcoded
+# --------------------------------------------------------------------------
+
+def default_sink() -> str | None:
+    code, out, _ = run(["pactl", "get-default-sink"])
+    return out or None if code == 0 else None
+
+
+def default_source() -> str | None:
+    code, out, _ = run(["pactl", "get-default-source"])
+    return out or None if code == 0 else None
+
+
+def resolve_devices(cfg: dict) -> tuple[str, str]:
+    audio = cfg["audio"]
+    sink = default_sink()
+    system = audio["system"]
+    if system == "auto-monitor":
+        if not sink:
+            fail("no default sink; cannot capture system audio")
+        system = f"{sink}.monitor"
+    mic = audio["mic"]
+    if mic == "auto":
+        mic = default_source()
+        if not mic:
+            fail("no default source; cannot capture microphone")
+    return system, mic
+
+
+def peak_dbfs(path: Path) -> float | None:
+    """Peak level via ffmpeg volumedetect. Note: volumedetect writes to stderr."""
+    if not which("ffmpeg") or not path.exists():
+        return None
+    code, _, err = run(
+        ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path),
+         "-af", "volumedetect", "-f", "null", "/dev/null"], timeout=300)
+    if code != 0:
+        return None
+    for line in err.splitlines():
+        if "max_volume:" in line:
+            try:
+                return float(line.split("max_volume:")[1].strip().split()[0])
+            except (IndexError, ValueError):
+                return None
+    return None
+
+
+def is_silent(path: Path) -> bool:
+    peak = peak_dbfs(path)
+    return peak is not None and peak <= SILENCE_FLOOR_DB
+
+
+def free_disk_mb(path: Path) -> int:
+    path.mkdir(parents=True, exist_ok=True)
+    stat = os.statvfs(path)
+    return int(stat.f_bavail * stat.f_frsize / (1024 * 1024))
+
+
+# --------------------------------------------------------------------------
+# session state
+# --------------------------------------------------------------------------
+
+def session() -> dict | None:
+    data = read_json(SESSION_FILE)
+    if not data:
+        return None
+    pid = data.get("pids", {}).get("mixed")
+    if pid and not pid_alive(pid):
+        data["orphaned"] = True
+    return data
+
+
+def pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except (OSError, TypeError):
+        return False
+
+
+def clear_session() -> None:
+    SESSION_FILE.unlink(missing_ok=True)
+
+
+def touch_heartbeat() -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    HEARTBEAT_FILE.write_text(iso(now()) + "\n")
+
+
+# --------------------------------------------------------------------------
+# calendar bridge — reads acp.calendar, degrades gracefully when absent
+# --------------------------------------------------------------------------
+
+def calendar_bin() -> str | None:
+    bundled = Path(__file__).resolve().with_name("omameet-calendar")
+    return str(bundled) if bundled.exists() else which("omarchy-calendar")
+
+
+def calendar_agenda(day: str | None = None) -> dict | None:
+    exe = calendar_bin()
+    if not exe:
+        return None
+    cmd = [exe, "agenda", "--json"]
+    if day:
+        cmd += ["--date", day]
+    code, out, _ = run(cmd, timeout=60)
+    if code != 0 or not out:
+        return None
+    try:
+        return json.loads(out)
+    except ValueError:
+        return None
+
+
+def qualifies(event: dict, cfg: dict) -> tuple[bool, str]:
+    cap = cfg["capture"]
+    if cap["skipAllDay"] and event.get("allDay"):
+        return False, "all-day"
+    title = (event.get("title") or "")
+    for skip in cap["skipTitles"]:
+        if skip.lower() in title.lower():
+            return False, f"title matches skip rule '{skip}'"
+    if cap["requireLink"] and not event.get("joinUrl"):
+        return False, "no video link"
+    try:
+        start = datetime.fromisoformat(event["start"])
+        end = datetime.fromisoformat(event["end"])
+        if (end - start).total_seconds() / 60 < cap["minDurationMin"]:
+            return False, f"shorter than {cap['minDurationMin']} min"
+    except (KeyError, ValueError):
+        return False, "unparseable times"
+    return True, "qualifies"
+
+
+# --------------------------------------------------------------------------
+# commands
+# --------------------------------------------------------------------------
+
+def cmd_doctor(args) -> None:
+    cfg = config()
+    checks = []
+
+    def check(name, ok, detail=""):
+        checks.append({"check": name, "ok": bool(ok), "detail": detail})
+
+    for tool, why in [("ffmpeg", "capture + silence verification"),
+                      ("pactl", "device resolution"),
+                      ("pw-cli", "audio activity detection")]:
+        check(f"tool:{tool}", which(tool), which(tool) or "MISSING")
+
+    check("tool:whisper-cli", which("whisper-cli") or which("whisper-cpp"),
+          which("whisper-cli") or which("whisper-cpp") or "MISSING (transcription)")
+
+    # LLM backend resolution order, and whether it can actually be used.
+    backend, detail = resolve_llm()
+    check("llm:backend", backend is not None, detail)
+    if backend == "codex":
+        code, out, _ = run(["codex", "login", "status"], timeout=30)
+        logged_in = code == 0 and "not logged in" not in out.lower()
+        check("llm:auth", logged_in,
+              out or ("authenticated" if logged_in else "codex present but NOT logged in "
+                      "— run: codex login"))
+
+    sink = default_sink()
+    source = default_source()
+    check("audio:sink", sink, sink or "no default sink")
+    check("audio:source", source, source or "no default source")
+    check("audio:monitor", sink, f"{sink}.monitor" if sink else "unavailable")
+
+    cal = calendar_bin()
+    check("calendar:acp.calendar", cal, cal or "not installed (standalone mode)")
+    if cal:
+        # Distinguish "the plugin cannot expose attendees" (a real capability gap
+        # that degrades speaker mapping) from "there are simply no events to
+        # inspect". Reporting the second as a failure is a false alarm.
+        agenda = calendar_agenda()
+        events = (agenda or {}).get("events", [])
+        accounts = (agenda or {}).get("accounts", [])
+        supports = supports_attendees(cal)
+        if not accounts:
+            check("calendar:attendees", supports,
+                  "capable, but no Google account connected yet" if supports
+                  else "acp.calendar cannot expose attendees — speaker mapping degraded")
+        elif not events:
+            check("calendar:attendees", supports,
+                  "capable; no events today to sample" if supports
+                  else "acp.calendar cannot expose attendees — speaker mapping degraded")
+        else:
+            present = any("attendees" in ev for ev in events)
+            check("calendar:attendees", present,
+                  "attendees present in live events" if present
+                  else "acp.calendar does not expose attendees — speaker mapping degraded")
+
+    vault = Path(cfg["vault"]["path"]).expanduser()
+    check("vault:writable", os.access(vault.parent, os.W_OK) if vault.parent.exists() else False,
+          str(vault))
+
+    free = free_disk_mb(STATE_DIR)
+    check("disk:free", free >= cfg["minFreeDiskMB"], f"{free} MB free")
+
+    try:
+        import transcribe as _t
+        model = _t.find_model(cfg["transcription"]["model"])
+        check("whisper:model", model, str(model) if model else
+              "no ggml model found — run: omarchy-meetings fetch-model")
+        import extract as _e  # noqa: F401
+        import vault as _v    # noqa: F401
+        check("lib:modules", True, "transcribe, extract, vault importable")
+    except Exception as exc:
+        check("lib:modules", False, f"import failed: {exc}")
+
+    ok = all(c["ok"] for c in checks if not c["check"].startswith("calendar:"))
+    payload = {"ok": ok, "version": VERSION, "checks": checks}
+    if args.json:
+        emit(payload, True)
+    else:
+        for c in checks:
+            print(f"[{'ok ' if c['ok'] else 'FAIL'}] {c['check']:<28} {c['detail']}")
+        print(f"\noverall: {'ok' if ok else 'FAILED'}")
+    sys.exit(0 if ok else 1)
+
+
+def supports_attendees(calendar_path: str) -> bool:
+    """Does the installed acp.calendar carry attendees through normalize()?"""
+    try:
+        source = Path(calendar_path).resolve().read_text()
+    except OSError:
+        return False
+    return '"attendees"' in source and "def attendees" in source
+
+
+def resolve_llm() -> tuple[str | None, str]:
+    """Machine-configured LLM. Never silently reach for a cloud key.
+
+    Delegates to lib/extract so doctor and the pipeline can never disagree
+    about which backend will actually be used.
+    """
+    try:
+        import extract as _e
+        return _e.resolve_backend()
+    except Exception:
+        if which("codex"):
+            return "codex", "codex exec"
+        return None, "no LLM configured on this machine"
+
+
+def cmd_next(args) -> None:
+    cfg = config()
+    agenda = calendar_agenda(args.date)
+    if agenda is None:
+        payload = {"available": False,
+                   "reason": "acp.calendar not installed or returned no data",
+                   "events": []}
+        emit(payload, args.json, "calendar unavailable — standalone mode only")
+        return
+    rows = []
+    for ev in agenda.get("events", []):
+        ok, reason = qualifies(ev, cfg)
+        rows.append({
+            "event_id": ev.get("id"),
+            "title": ev.get("title"),
+            "start": ev.get("start"),
+            "end": ev.get("end"),
+            "joinUrl": ev.get("joinUrl"),
+            "calendar": ev.get("calendarLabel"),
+            "attendees": ev.get("attendees", []),
+            "willRecord": ok,
+            "reason": reason,
+        })
+    payload = {"available": True, "date": agenda.get("date"), "events": rows}
+    if args.json:
+        emit(payload, True)
+    else:
+        if not rows:
+            print("no events")
+        for r in rows:
+            mark = "REC " if r["willRecord"] else "skip"
+            start = (r["start"] or "")[11:16]
+            print(f"[{mark}] {start}  {r['title']}   ({r['reason']})")
+
+
+def cmd_status(args) -> None:
+    sess = session()
+    cfg = config()
+    payload = {
+        "recording": bool(sess and not sess.get("orphaned")),
+        "orphaned": bool(sess and sess.get("orphaned")),
+        "session": sess,
+        "paused": (STATE_DIR / "paused").exists(),
+        "heartbeat": HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else None,
+        "version": VERSION,
+    }
+    if args.json:
+        emit(payload, True)
+    else:
+        if payload["orphaned"]:
+            print("orphaned recording present — run 'omarchy-meetings record stop'")
+        elif payload["recording"]:
+            print(f"recording: {sess.get('title')} since {sess.get('started')}")
+        elif payload["paused"]:
+            print("paused")
+        else:
+            print("idle")
+
+
+def cmd_pause(args) -> None:
+    marker = STATE_DIR / "paused"
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if args.off:
+        marker.unlink(missing_ok=True)
+        print("resumed")
+    else:
+        marker.write_text(iso(now()) + "\n")
+        print("paused — auto-recording disabled until resumed")
+
+
+def start_recording(cfg: dict, title: str, event: dict | None) -> dict:
+    if (STATE_DIR / "paused").exists():
+        fail("paused — refusing to start", notify_user=False)
+    if session():
+        fail("a recording is already in progress")
+    if not which("ffmpeg"):
+        fail("ffmpeg is required for capture (pw-record produces silent files)")
+
+    free = free_disk_mb(STATE_DIR)
+    if free < cfg["minFreeDiskMB"]:
+        fail(f"only {free} MB free, need {cfg['minFreeDiskMB']} MB — refusing to start")
+
+    system, mic = resolve_devices(cfg)
+    started = now()
+    slug = started.strftime("%Y-%m-%d-%H%M%S")
+    outdir = RECORDINGS_DIR / slug
+    outdir.mkdir(parents=True, exist_ok=True)
+
+    # Three artifacts: mic anchors "me", system carries everyone else,
+    # mixed is what whisper transcribes.
+    mic_wav = outdir / "mic.wav"
+    sys_wav = outdir / "system.wav"
+    mixed = outdir / "mixed.opus"
+
+    def spawn(cmd, logname):
+        log = open(outdir / logname, "wb")
+        return subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, start_new_session=True)
+
+    p_mic = spawn(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-f", "pulse", "-i", mic, "-ac", "1", str(mic_wav)], "mic.log")
+    p_sys = spawn(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-f", "pulse", "-i", system, "-ac", "1", str(sys_wav)], "system.log")
+    p_mix = spawn(["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                   "-f", "pulse", "-i", system, "-f", "pulse", "-i", mic,
+                   "-filter_complex", "[0:a][1:a]amix=inputs=2:duration=longest[a]",
+                   "-map", "[a]", "-c:a", "libopus", "-b:a", "32k", str(mixed)], "mixed.log")
+
+    sess = {
+        "slug": slug,
+        "dir": str(outdir),
+        "title": title,
+        "event": event,
+        "event_id": (event or {}).get("id") or f"adhoc_{slug}",
+        "started": iso(started),
+        "devices": {"system": system, "mic": mic},
+        "host_machine": os.uname().nodename,
+        "pids": {"mic": p_mic.pid, "system": p_sys.pid, "mixed": p_mix.pid},
+        "adhoc": event is None,
+    }
+    write_json_atomic(SESSION_FILE, sess)
+    notify("Recording started", title)
+    return sess
+
+
+def stop_recording(cfg: dict) -> dict:
+    sess = session()
+    if not sess:
+        fail("no recording in progress", notify_user=False)
+    for pid in sess.get("pids", {}).values():
+        try:
+            os.kill(pid, signal.SIGINT)   # let ffmpeg finalize headers
+        except OSError:
+            pass
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        if not any(pid_alive(p) for p in sess.get("pids", {}).values()):
+            break
+        time.sleep(0.5)
+    for pid in sess.get("pids", {}).values():
+        if pid_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+    outdir = Path(sess["dir"])
+    mixed = outdir / "mixed.opus"
+    sess["ended"] = iso(now())
+
+    # Silence is a failure. Size and exit code both lie.
+    verdict = {"mixed_peak_db": peak_dbfs(mixed), "silent": None, "exists": mixed.exists()}
+    verdict["silent"] = bool(mixed.exists() and is_silent(mixed))
+    sess["capture_check"] = verdict
+    write_json_atomic(outdir / "session.json", sess)
+    clear_session()
+
+    if not mixed.exists():
+        notify("Recording FAILED", "no audio file produced", urgent=True)
+        print(json.dumps(sess, indent=2))
+        sys.exit(1)
+    if verdict["silent"]:
+        notify("Recording FAILED", "captured silence — check audio devices", urgent=True)
+        print(json.dumps(sess, indent=2))
+        sys.exit(1)
+
+    notify("Recording stopped", f"{sess['title']} — audio captured")
+    return sess
+
+
+def cmd_record(args) -> None:
+    cfg = config()
+    if args.action == "start":
+        sess = start_recording(cfg, args.title or "[ad-hoc] recording", None)
+        emit(sess, args.json, f"recording -> {sess['dir']}")
+    elif args.action == "stop":
+        sess = stop_recording(cfg)
+        # A manual stop (including the panel button) is the end of capture, not
+        # the end of the workflow.  Process asynchronously so the UI remains
+        # responsive while Whisper and the summarizer write into the vault.
+        subprocess.Popen([sys.argv[0], "process", sess["dir"]],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+        emit(sess, args.json,
+             f"stopped; processing -> {sess['dir']}")
+
+
+def cmd_join(args) -> None:
+    """Start capture with calendar context, then open the meeting URL."""
+    if not re.match(r"^https://", args.url or "", re.I):
+        fail("refusing non-HTTPS meeting URL")
+    try:
+        event = json.loads(args.event_json)
+    except (TypeError, ValueError):
+        fail("invalid calendar event JSON")
+    sess = session()
+    if not sess:
+        sess = start_recording(config(), args.title or "Meeting", event)
+    subprocess.Popen(["xdg-open", args.url], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    emit({"recording": True, "dir": sess["dir"], "url": args.url}, args.json,
+         f"recording and joining: {sess['title']}")
+
+
+def cmd_audit(args) -> None:
+    """Reconciler: qualifying calendar events vs meetings actually captured."""
+    cfg = config()
+    captured = []
+    if RECORDINGS_DIR.exists():
+        for d in sorted(RECORDINGS_DIR.iterdir()):
+            meta = read_json(d / "session.json")
+            if meta:
+                captured.append(meta)
+    captured_ids = {m.get("event_id") for m in captured}
+
+    agenda = calendar_agenda()
+    missed = []
+    qualifying = 0
+    if agenda:
+        for ev in agenda.get("events", []):
+            ok, _ = qualifies(ev, cfg)
+            if not ok:
+                continue
+            qualifying += 1
+            try:
+                if datetime.fromisoformat(ev["end"]) > now():
+                    continue  # not finished yet
+            except (KeyError, ValueError):
+                continue
+            if ev.get("id") not in captured_ids:
+                missed.append({"event_id": ev.get("id"), "title": ev.get("title"),
+                               "start": ev.get("start"), "reason": diagnose_miss()})
+
+    payload = {"captured": len(captured), "qualifying": qualifying,
+               "adhoc": sum(1 for m in captured if m.get("adhoc")),
+               "missed": missed, "calendar_available": agenda is not None}
+    if args.json:
+        emit(payload, True)
+    else:
+        print(f"captured {payload['captured']} ({payload['adhoc']} ad-hoc), "
+              f"{len(missed)} missed")
+        for m in missed:
+            print(f"  MISSED  {m['start']}  {m['title']}  ({m['reason']})")
+
+    if missed and cfg["audit"]["alertOnMiss"]:
+        user_reasons = {"user_declined", "paused"}
+        if any(m["reason"] not in user_reasons for m in missed):
+            notify("Meetings: missed a meeting",
+                   f"{len(missed)} qualifying meeting(s) were not recorded", urgent=True)
+            sys.exit(1)
+
+
+def diagnose_miss() -> str:
+    if (STATE_DIR / "paused").exists():
+        return "paused"
+    if not HEARTBEAT_FILE.exists():
+        return "plugin_not_running"
+    try:
+        last = datetime.fromisoformat(HEARTBEAT_FILE.read_text().strip())
+        if (now() - last).total_seconds() > 900:
+            return "host_asleep_or_plugin_stopped"
+    except ValueError:
+        pass
+    return "unknown"
+
+
+def cmd_heartbeat(args) -> None:
+    touch_heartbeat()
+    print("ok")
+
+
+def cmd_config(args) -> None:
+    cfg = config()
+    if args.init:
+        save_config(read_json(CONFIG_FILE, {}) or {})
+        print(f"wrote {CONFIG_FILE}")
+    emit(cfg, True)
+
+
+def vault_dir(cfg: dict) -> Path:
+    return Path(cfg["vault"]["path"]).expanduser()
+
+
+def load_meetings(cfg: dict) -> list[dict]:
+    """Every meeting.json in the vault. This is the agent's read model."""
+    out = []
+    root = vault_dir(cfg)
+    if not root.exists():
+        return out
+    for path in sorted(root.glob("*/meeting.json")):
+        data = read_json(path)
+        if data:
+            data["_path"] = str(path.parent)
+            out.append(data)
+    return out
+
+
+def acquire_process_lock(src: Path):
+    """Hold an advisory lock for one recording's entire processing run."""
+    handle = (src / ".process.lock").open("a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RuntimeError(f"recording is already being processed: {src}")
+    return handle
+
+
+def cmd_process(args) -> None:
+    """Recording -> transcript -> speakers -> meeting.json -> notes."""
+    import transcribe as T
+    import extract as E
+    import vault as V
+
+    cfg = config()
+    src = Path(args.path).expanduser() if args.path else latest_recording()
+    if not src or not src.exists():
+        fail("no recording directory given and none found")
+
+    try:
+        process_lock = acquire_process_lock(src)
+    except RuntimeError as error:
+        fail(str(error))
+
+    meta = read_json(src / "session.json") or {}
+    mixed = src / "mixed.opus"
+    mic_wav, sys_wav = src / "mic.wav", src / "system.wav"
+    if not mixed.exists():
+        event_id = meta.get("event_id")
+        existing = next((item for item in load_meetings(cfg)
+                         if item.get("meeting", {}).get("event_id") == event_id), None)
+        if existing:
+            emit({"ok": True, "dir": existing["_path"], "already_processed": True},
+                 args.json, f"{existing['_path']}\n  already processed")
+            return
+        fail(f"no mixed.opus in {src}")
+    if is_silent(mixed):
+        fail("recording is silent — refusing to transcribe (audio retained)")
+
+    # 1. transcribe locally
+    tr = T.transcribe(mixed, src, cfg["transcription"]["model"], cfg["transcription"]["lang"])
+    if not tr["ok"]:
+        fail(f"transcription failed: {tr['error']} (audio retained)")
+
+    # 2. speaker attribution
+    segments, method = T.diarize(tr["segments"], mic_wav, sys_wav, mixed, src)
+    event = meta.get("event") or {}
+    attendees = event.get("attendees", [])
+    me = {"name": cfg.get("me", {}).get("name"), "email": cfg.get("me", {}).get("email"),
+          "organizer": True}
+    participants, conflicts = T.resolve_speakers(segments, attendees, me)
+    transcript_md = T.render_transcript(segments, participants)
+
+    meeting = {
+        "id": src.name,
+        "event_id": meta.get("event_id"),
+        "series_id": event.get("recurringEventId"),
+        "title": event.get("title") or meta.get("title") or "[ad-hoc] recording",
+        "agenda": event.get("description"),
+        "scheduled": {"start": event.get("start"), "end": event.get("end")},
+        "actual": {"start": meta.get("started"), "end": meta.get("ended")},
+        "platform": detect_platform(event.get("joinUrl", "")),
+        "join_url": event.get("joinUrl"),
+        "organizer": event.get("organizer"),
+        "calendar": {"label": event.get("calendarLabel")},
+        "host_machine": meta.get("host_machine"),
+        "adhoc": meta.get("adhoc", True),
+        "diarization_method": method,
+        "transcript_model": tr.get("model"),
+    }
+
+    # 3. three-pass extraction
+    extracted = E.extract(transcript_md, participants, meeting)
+    notes_body = E.write_notes(meeting, participants, extracted, transcript_md)
+
+    # 4. write vault; audio deleted only after verification
+    result = V.write_meeting(vault_dir(cfg), meeting, participants, conflicts,
+                             extracted, transcript_md, notes_body,
+                             [mixed, mic_wav, sys_wav], cfg["retainAudio"])
+    if not result["ok"]:
+        fail("vault write could not be verified — audio retained")
+
+    payload = {
+        "ok": True, "dir": result["dir"],
+        "commitments": len(extracted.get("commitments", [])),
+        "decisions": len(extracted.get("decisions", [])),
+        "uncertain": len(extracted.get("uncertain", [])),
+        "participants": [{"name": p.get("name"), "speaker": p["speaker"],
+                          "resolved_by": p.get("resolved_by"),
+                          "talk_time_pct": p.get("talk_time_pct")} for p in participants],
+        "audio_deleted": result["audio_deleted"],
+        "llm": extracted.get("llm", {}),
+        "extraction_error": extracted.get("error"),
+    }
+    payload["audio_retained"] = result["audio_retained"]
+    payload["extraction_ok"] = result["extraction_ok"]
+
+    if not result["extraction_ok"]:
+        # Transcript and notes exist, but extraction failed. Audio is retained so
+        # the meeting can be reprocessed. This is a failure — report it as one.
+        notify("Meeting partially processed",
+               f"{meeting['title']} — transcript saved, extraction FAILED (audio retained)",
+               urgent=True)
+        emit(payload, args.json,
+             f"{result['dir']}\n  transcript written; EXTRACTION FAILED: "
+             f"{payload['extraction_error']}\n  audio retained for reprocessing")
+        sys.exit(3)
+
+    notify("Meeting processed", f"{meeting['title']} — {payload['commitments']} commitments")
+    emit(payload, args.json,
+         f"{result['dir']}\n  {payload['commitments']} commitments, "
+         f"{payload['decisions']} decisions, {payload['uncertain']} uncertain")
+
+
+def detect_platform(url: str) -> str | None:
+    url = (url or "").lower()
+    for needle, name in (("meet.google", "google_meet"), ("zoom.", "zoom"),
+                         ("teams.", "teams"), ("webex", "webex")):
+        if needle in url:
+            return name
+    return None
+
+
+def latest_recording() -> Path | None:
+    if not RECORDINGS_DIR.exists():
+        return None
+    dirs = [d for d in RECORDINGS_DIR.iterdir() if d.is_dir()]
+    return max(dirs, key=lambda d: d.stat().st_mtime) if dirs else None
+
+
+def cmd_list(args) -> None:
+    cfg = config()
+    rows = []
+    for m in load_meetings(cfg):
+        meeting = m.get("meeting", {})
+        rows.append({
+            "id": meeting.get("id"), "title": meeting.get("title"),
+            "date": (meeting.get("scheduled", {}).get("start")
+                     or meeting.get("actual", {}).get("start") or "")[:10],
+            "commitments": len(m.get("commitments", [])),
+            "open": sum(1 for c in m.get("commitments", []) if c.get("status") == "open"),
+            "path": m.get("_path"),
+        })
+    rows.sort(key=lambda r: r["date"] or "", reverse=True)
+    if args.json:
+        emit({"meetings": rows}, True)
+    else:
+        for r in rows:
+            print(f"{r['date']}  {r['title']}  ({r['open']}/{r['commitments']} open)")
+
+
+def cmd_show(args) -> None:
+    cfg = config()
+    for m in load_meetings(cfg):
+        if m.get("meeting", {}).get("id") == args.id:
+            emit(m, True)
+            return
+    fail(f"meeting not found: {args.id}", notify_user=False)
+
+
+def cmd_commitments(args) -> None:
+    cfg = config()
+    today = now().date().isoformat()
+    rows = []
+    for m in load_meetings(cfg):
+        meeting = m.get("meeting", {})
+        for c in m.get("commitments", []):
+            owner = (c.get("owner") or {}).get("name")
+            due = (c.get("due") or {}).get("value")
+            if args.open and c.get("status") != "open":
+                continue
+            if args.owner and (owner or "").lower() != args.owner.lower():
+                continue
+            if args.overdue and not (due and due < today and c.get("status") == "open"):
+                continue
+            rows.append({
+                "id": c["id"], "meeting_id": meeting.get("id"),
+                "meeting_title": meeting.get("title"),
+                "owner": owner, "email": (c.get("owner") or {}).get("email"),
+                "text": c.get("text"), "verbatim": c.get("verbatim"),
+                "due": due, "status": c.get("status"),
+                "confidence": c.get("confidence"),
+                "needs_human": c.get("needs_human"),
+            })
+    if args.json:
+        emit({"commitments": rows, "count": len(rows)}, True)
+    else:
+        for r in rows:
+            flag = " [needs review]" if r["needs_human"] else ""
+            print(f"{r['id']}  {r['owner'] or 'Unassigned'}: {r['text']}"
+                  f"{' — due ' + r['due'] if r['due'] else ''}{flag}")
+    if args.overdue and rows:
+        sys.exit(2)   # non-zero so a cron can alert on overdue work
+
+
+def cmd_close(args) -> None:
+    cfg = config()
+    for m in load_meetings(cfg):
+        for c in m.get("commitments", []):
+            if c["id"] == args.id:
+                c["status"] = "closed"
+                c["closed_at"] = iso(now())
+                c["closed_evidence"] = args.evidence
+                path = Path(m["_path"]) / "meeting.json"
+                payload = {k: v for k, v in m.items() if k != "_path"}
+                write_json_atomic(path, payload)
+                emit({"closed": args.id, "evidence": args.evidence}, args.json,
+                     f"closed {args.id}")
+                return
+    fail(f"commitment not found: {args.id}", notify_user=False)
+
+
+def cmd_followups(args) -> None:
+    cfg = config()
+    rows = []
+    for m in load_meetings(cfg):
+        for f in m.get("followups", []):
+            if args.pending and f.get("status") != "draft":
+                continue
+            rows.append(dict(f, meeting_id=m.get("meeting", {}).get("id")))
+    emit({"followups": rows, "count": len(rows),
+          "note": "drafts only — nothing is sent without approval"}, args.json,
+         "\n".join(f"[{f['action']}] {f.get('title') or f.get('to')}" for f in rows) or "none")
+
+
+def cmd_brief(args) -> None:
+    """Who you're meeting next, and what they still owe you."""
+    cfg = config()
+    agenda = calendar_agenda()
+    upcoming = None
+    if agenda:
+        for ev in agenda.get("events", []):
+            ok, _ = qualifies(ev, cfg)
+            try:
+                if ok and datetime.fromisoformat(ev["start"]) > now():
+                    upcoming = ev
+                    break
+            except (KeyError, ValueError):
+                continue
+
+    people = set()
+    for a in (upcoming or {}).get("attendees", []):
+        if a.get("email"):
+            people.add(a["email"].lower())
+
+    open_items, history = [], []
+    for m in load_meetings(cfg):
+        meeting = m.get("meeting", {})
+        relevant = not people or any(
+            (p.get("email") or "").lower() in people for p in m.get("participants", []))
+        if relevant:
+            history.append({"id": meeting.get("id"), "title": meeting.get("title"),
+                            "date": (meeting.get("actual", {}).get("start") or "")[:10]})
+            for c in m.get("commitments", []):
+                if c.get("status") == "open":
+                    open_items.append({
+                        "id": c["id"], "owner": (c.get("owner") or {}).get("name"),
+                        "text": c.get("text"), "due": (c.get("due") or {}).get("value"),
+                        "from_meeting": meeting.get("title"),
+                    })
+    history.sort(key=lambda h: h["date"] or "", reverse=True)
+    payload = {"next_meeting": upcoming, "previous_meetings": history[:3],
+               "open_commitments": open_items}
+    if args.json:
+        emit(payload, True)
+    else:
+        if upcoming:
+            print(f"Next: {upcoming.get('title')} at {(upcoming.get('start') or '')[11:16]}")
+        else:
+            print("Next: nothing scheduled")
+        if history:
+            print(f"Last met: {history[0]['title']} ({history[0]['date']})")
+        for item in open_items:
+            print(f"  open: {item['owner'] or 'Unassigned'} — {item['text']}"
+                  f"{' (due ' + item['due'] + ')' if item['due'] else ''}")
+
+
+def cmd_tick(args) -> None:
+    """One autopilot cycle. Driven by the plugin service (and a cron safety net).
+
+    Decides whether to start or stop a recording. Safe to call every 60 seconds,
+    and idempotent.
+    """
+    import autopilot as A
+
+    cfg = config()
+    actions = []
+    tick_now = now()
+    last_tick_raw = read_json(STATE_DIR / "lasttick.json", {}) or {}
+    last_tick = None
+    try:
+        last_tick = datetime.fromisoformat(last_tick_raw.get("at"))
+    except (TypeError, ValueError):
+        pass
+    woke = A.slept_since(last_tick, tick_now, cfg.get("pollIntervalSec", 60))
+    write_json_atomic(STATE_DIR / "lasttick.json", {"at": iso(tick_now)})
+    touch_heartbeat()
+
+    paused = (STATE_DIR / "paused").exists()
+    sess = session()
+
+    # --- already recording: decide whether to stop -------------------------
+    if sess and not sess.get("orphaned"):
+        outdir = Path(sess["dir"])
+        mixed = outdir / "mixed.opus"
+        event = sess.get("event") or {}
+        past_end = False
+        if event.get("end"):
+            try:
+                past_end = tick_now > datetime.fromisoformat(event["end"]) + timedelta(minutes=30)
+            except ValueError:
+                past_end = False
+        app_active, app = A.meeting_app_active(cfg)
+        if app_active:
+            sess["capture_client"] = app
+            sess["capture_client_seen_at"] = iso(tick_now)
+            write_json_atomic(SESSION_FILE, sess)
+        app_gone = False
+        last_client = sess.get("capture_client_seen_at")
+        if last_client and not app_active:
+            try:
+                app_gone = (tick_now - datetime.fromisoformat(last_client)).total_seconds() >= int(
+                    cfg["capture"].get("appExitGraceSec", 90))
+            except ValueError:
+                pass
+        quiet = A.tail_is_silent(mixed, cfg["capture"]["silenceStopSec"])
+        if quiet or past_end or app_gone:
+            reason = "app_exit" if app_gone else ("silence" if quiet else "past_end")
+            actions.append("stop:" + reason)
+            try:
+                stopped = stop_recording(cfg)
+                A.release(STATE_DIR, stopped.get("event_id", ""))
+                if args.process:
+                    actions.append("process")
+                    subprocess.Popen([sys.argv[0], "process", stopped["dir"]],
+                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                     start_new_session=True)
+            except SystemExit:
+                actions.append("stop_failed")
+        emit({"actions": actions, "state": "idle" if actions else "recording", "woke": woke}, args.json,
+             ", ".join(actions) or "recording")
+        return
+
+    # --- orphaned recording from a crash -----------------------------------
+    if sess and sess.get("orphaned"):
+        actions.append("recover_orphan")
+        try:
+            stop_recording(cfg)
+        except SystemExit:
+            pass
+        emit({"actions": actions, "state": "recovered"}, args.json, "recovered orphan")
+        return
+
+    if paused:
+        emit({"actions": ["paused"], "state": "paused"}, args.json, "paused")
+        return
+
+    # --- trigger 1: calendar ------------------------------------------------
+    agenda = calendar_agenda()
+    event = None
+    if agenda and cfg["detection"].get("calendarPoll", True):
+        event = A.due_event(agenda.get("events", []), cfg, qualifies, tick_now)
+
+    if event:
+        if already_recorded(cfg, event.get("id")):
+            emit({"actions": ["already_recorded"], "state": "idle"}, args.json,
+                 "already recorded")
+            return
+        if not A.claim(STATE_DIR, event.get("id", ""), os.uname().nodename):
+            emit({"actions": ["claimed_elsewhere"], "state": "idle"}, args.json,
+                 "another host is recording this meeting")
+            return
+        actions.append("start:calendar" + (":wake_catchup" if woke else ""))
+        sess = start_recording(cfg, event.get("title") or "Meeting", event)
+        emit({"actions": actions, "state": "recording", "dir": sess["dir"], "woke": woke},
+             args.json, f"started (calendar): {sess['title']}")
+        return
+
+    # --- trigger 2: audio activity (a call the calendar never knew about) ---
+    active, app = A.meeting_app_active(cfg)
+    if active:
+        window = A.active_window_class()          # trigger 3: confirmation only
+        if cfg["detection"].get("autoRecordUnplanned", False):
+            actions.append(f"start:audio:{app}")
+            sess = start_recording(cfg, f"[ad-hoc] call ({app})", None)
+            emit({"actions": actions, "state": "recording", "app": app, "window": window},
+                 args.json, f"started (unplanned {app})")
+        else:
+            # Prompting is deliberate: silently recording is worse than missing.
+            notify("Call detected",
+                   f"{app} is using the microphone. "
+                   f"Run 'omarchy-meetings record start' to capture.")
+            actions.append(f"prompt:{app}")
+            emit({"actions": actions, "state": "idle", "app": app, "window": window},
+                 args.json, f"prompted for unplanned call ({app})")
+        return
+
+    emit({"actions": actions or ["noop"], "state": "idle", "woke": woke}, args.json, "idle")
+
+
+def already_recorded(cfg: dict, event_id: str | None) -> bool:
+    if not event_id:
+        return False
+    for meeting in load_meetings(cfg):
+        if meeting.get("meeting", {}).get("event_id") == event_id:
+            return True
+    if RECORDINGS_DIR.exists():
+        for directory in RECORDINGS_DIR.iterdir():
+            meta = read_json(directory / "session.json") or {}
+            if meta.get("event_id") == event_id:
+                return True
+    return False
+
+
+def cmd_watchdog(args) -> None:
+    """Fail loud on stale state. Exits non-zero so cron surfaces the problem."""
+    cfg = config()
+    problems = []
+
+    if HEARTBEAT_FILE.exists():
+        try:
+            last = datetime.fromisoformat(HEARTBEAT_FILE.read_text().strip())
+            age = (now() - last).total_seconds()
+            if age > 3600:
+                problems.append({"issue": "stale_heartbeat",
+                                 "detail": f"service has not ticked in {int(age / 60)} min"})
+        except ValueError:
+            problems.append({"issue": "unreadable_heartbeat",
+                             "detail": "corrupt heartbeat file"})
+    else:
+        problems.append({"issue": "no_heartbeat", "detail": "service has never run"})
+
+    sess = session()
+    if sess and sess.get("orphaned"):
+        problems.append({"issue": "orphaned_recording", "detail": sess.get("dir")})
+    if sess and not sess.get("orphaned"):
+        try:
+            started = datetime.fromisoformat(sess["started"])
+            if (now() - started).total_seconds() > 6 * 3600:
+                problems.append({"issue": "recording_stuck",
+                                 "detail": "recording has run for over 6 hours"})
+        except (KeyError, ValueError):
+            pass
+
+    # Unprocessed recordings mean transcripts are silently not being produced.
+    stale = []
+    if RECORDINGS_DIR.exists():
+        for directory in RECORDINGS_DIR.iterdir():
+            if not (directory / "mixed.opus").exists():
+                continue
+            meta = read_json(directory / "session.json") or {}
+            if not meta.get("ended"):
+                continue
+            try:
+                if (now() - datetime.fromisoformat(meta["ended"])).total_seconds() > 7200:
+                    stale.append(str(directory))
+            except ValueError:
+                pass
+    if stale:
+        problems.append({"issue": "unprocessed_recordings",
+                         "detail": f"{len(stale)} recording(s) awaiting processing",
+                         "paths": stale})
+
+    free = free_disk_mb(STATE_DIR)
+    if free < cfg["minFreeDiskMB"]:
+        problems.append({"issue": "low_disk", "detail": f"{free} MB free"})
+
+    payload = {"ok": not problems, "problems": problems, "checked": iso(now())}
+    if args.json:
+        emit(payload, True)
+    else:
+        for problem in problems:
+            print(f"PROBLEM {problem['issue']}: {problem['detail']}")
+        if not problems:
+            print("ok")
+
+    if problems:
+        notify("Meetings: watchdog", "; ".join(p["issue"] for p in problems), urgent=True)
+        sys.exit(1)
+
+
+TICK_SERVICE = """[Unit]
+Description=omarchy-meetings autopilot tick
+
+[Service]
+Type=oneshot
+ExecStart={exe} tick --process
+"""
+
+TICK_TIMER = """[Unit]
+Description=Run omarchy-meetings autopilot every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+AccuracySec=15s
+
+[Install]
+WantedBy=timers.target
+"""
+
+AUDIT_SERVICE = """[Unit]
+Description=omarchy-meetings nightly reconciler
+
+[Service]
+Type=oneshot
+ExecStart={exe} audit
+"""
+
+AUDIT_TIMER = """[Unit]
+Description=Nightly meeting audit
+
+[Timer]
+OnCalendar=*-*-* 22:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
+WATCHDOG_SERVICE = """[Unit]
+Description=omarchy-meetings watchdog
+
+[Service]
+Type=oneshot
+ExecStart={exe} watchdog
+"""
+
+WATCHDOG_TIMER = """[Unit]
+Description=Hourly meetings watchdog
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=1h
+
+[Install]
+WantedBy=timers.target
+"""
+
+
+def cmd_install_timers(args) -> None:
+    """systemd user timers: autopilot tick, nightly audit, hourly watchdog."""
+    unit_dir = Path.home() / ".config/systemd/user"
+    unit_dir.mkdir(parents=True, exist_ok=True)
+    exe = shutil.which("omarchy-meetings") or str(Path(__file__).resolve())
+
+    units = {
+        "omarchy-meetings-tick.service": TICK_SERVICE.format(exe=exe),
+        "omarchy-meetings-tick.timer": TICK_TIMER,
+        "omarchy-meetings-audit.service": AUDIT_SERVICE.format(exe=exe),
+        "omarchy-meetings-audit.timer": AUDIT_TIMER,
+        "omarchy-meetings-watchdog.service": WATCHDOG_SERVICE.format(exe=exe),
+        "omarchy-meetings-watchdog.timer": WATCHDOG_TIMER,
+    }
+    for name, body in units.items():
+        (unit_dir / name).write_text(body)
+
+    enabled = []
+    if which("systemctl"):
+        run(["systemctl", "--user", "daemon-reload"], timeout=30)
+        for timer in ("omarchy-meetings-tick.timer", "omarchy-meetings-audit.timer",
+                      "omarchy-meetings-watchdog.timer"):
+            code, _, _ = run(["systemctl", "--user", "enable", "--now", timer], timeout=30)
+            if code == 0:
+                enabled.append(timer)
+    emit({"units": sorted(units), "enabled": enabled, "dir": str(unit_dir)}, args.json,
+         f"wrote {len(units)} units to {unit_dir}; enabled {len(enabled)} timers")
+
+
+def cmd_fetch_model(args) -> None:
+    """Download a whisper.cpp ggml model into the user's data dir."""
+    import urllib.request
+    name = args.model
+    dest_dir = Path.home() / ".local/share/whisper.cpp/models"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"ggml-{name}.bin"
+    if dest.exists():
+        emit({"ok": True, "path": str(dest), "cached": True}, args.json,
+             f"already present: {dest}")
+        return
+    url = ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
+           f"ggml-{name}.bin")
+    tmp = dest.with_suffix(".part")
+    try:
+        print(f"downloading {name} ...", file=sys.stderr)
+        urllib.request.urlretrieve(url, tmp)
+        tmp.replace(dest)
+    except Exception as exc:
+        tmp.unlink(missing_ok=True)
+        fail(f"model download failed: {exc}")
+    emit({"ok": True, "path": str(dest), "bytes": dest.stat().st_size}, args.json,
+         f"downloaded {dest}")
+
+
+def cmd_version(args) -> None:
+    emit({"name": APP, "version": VERSION}, args.json, f"{APP} {VERSION}")
+
+
+# --------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    # --json is accepted BOTH before and after the subcommand. argparse will not
+    # match a parent-level flag that appears after the subcommand, so every
+    # subparser gets its own copy. The CLI is the agent API; `cmd --json` must work.
+    jsonflag = argparse.ArgumentParser(add_help=False)
+    jsonflag.add_argument("--json", action="store_true", help="machine-readable output")
+
+    p = argparse.ArgumentParser(prog=APP, description=__doc__.splitlines()[0],
+                                parents=[jsonflag])
+    sub = p.add_subparsers(dest="command", required=True)
+
+    def add(name, **kw):
+        return sub.add_parser(name, parents=[jsonflag], **kw)
+
+    add("doctor", help="verify audio rig, LLM backend, calendar, disk").set_defaults(func=cmd_doctor)
+    add("status", help="current recording state").set_defaults(func=cmd_status)
+    add("heartbeat", help="mark the service alive").set_defaults(func=cmd_heartbeat)
+    add("version").set_defaults(func=cmd_version)
+
+    nxt = add("next", help="today's meetings and whether they'll be recorded")
+    nxt.add_argument("--date")
+    nxt.set_defaults(func=cmd_next)
+
+    rec = add("record", help="start/stop a recording")
+    rec.add_argument("action", choices=("start", "stop"))
+    rec.add_argument("--title")
+    rec.set_defaults(func=cmd_record)
+
+    join = add("join", help="start recording with calendar context and open meeting URL")
+    join.add_argument("--title", required=True)
+    join.add_argument("--url", required=True)
+    join.add_argument("--event-json", required=True)
+    join.set_defaults(func=cmd_join)
+
+    pause = add("pause", help="disable auto-recording")
+    pause.add_argument("--off", action="store_true", help="resume")
+    pause.set_defaults(func=cmd_pause)
+
+    add("audit", help="reconcile calendar vs captured meetings").set_defaults(func=cmd_audit)
+
+    proc = add("process", help="transcribe, attribute speakers, extract, write to vault")
+    proc.add_argument("path", nargs="?", help="recording dir (default: most recent)")
+    proc.set_defaults(func=cmd_process)
+
+    lst = add("list", help="meetings in the vault")
+    lst.add_argument("--since")
+    lst.set_defaults(func=cmd_list)
+
+    show = add("show", help="full meeting.json contract")
+    show.add_argument("id")
+    show.set_defaults(func=cmd_show)
+
+    com = add("commitments", help="query commitments across meetings")
+    com.add_argument("--open", action="store_true")
+    com.add_argument("--overdue", action="store_true")
+    com.add_argument("--owner")
+    com.set_defaults(func=cmd_commitments)
+
+    close = add("close", help="close a commitment with evidence")
+    close.add_argument("id")
+    close.add_argument("--evidence", default="")
+    close.set_defaults(func=cmd_close)
+
+    fup = add("followups", help="drafted follow-ups (never sent automatically)")
+    fup.add_argument("--pending", action="store_true")
+    fup.set_defaults(func=cmd_followups)
+
+    tick = add("tick", help="one autopilot cycle (start/stop decisions)")
+    tick.add_argument("--process", action="store_true",
+                      help="process the recording after stopping")
+    tick.set_defaults(func=cmd_tick)
+
+    add("watchdog", help="fail loud on stale state").set_defaults(func=cmd_watchdog)
+    add("install-timers", help="install systemd user timers").set_defaults(func=cmd_install_timers)
+
+    fetch = add("fetch-model", help="download a whisper ggml model")
+    fetch.add_argument("model", nargs="?", default="base.en")
+    fetch.set_defaults(func=cmd_fetch_model)
+
+    brief = add("brief", help="next meeting + their open commitments")
+    brief.add_argument("--next", action="store_true")
+    brief.set_defaults(func=cmd_brief)
+
+    cfgp = add("config", help="show effective config")
+    cfgp.add_argument("--init", action="store_true")
+    cfgp.set_defaults(func=cmd_config)
+    return p
+
+
+def main() -> None:
+    args = build_parser().parse_args()
+    STATE_DIR.mkdir(parents=True, exist_ok=True, mode=0o700)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

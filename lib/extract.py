@@ -1,0 +1,442 @@
+"""Three-pass extraction: transcript -> meeting.json (the agent contract).
+
+Pass 1  high-recall candidates per chunk
+Pass 2  consolidate, dedupe, resolve relative dates and pronouns
+Pass 3  VERIFY every item against a literal quote; unsupported items are dropped
+
+Confidence gates autonomy:
+  >= 0.85  auto-create
+  0.60-0.85 needs_review
+  <  0.60  uncertain[] with the quote, never silently dropped
+
+Never invent an owner or a due date.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+from datetime import datetime, timedelta
+
+AUTO_THRESHOLD = 0.85
+REVIEW_THRESHOLD = 0.60
+CHUNK_CHARS = 6000
+
+WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday",
+            "friday", "saturday", "sunday"]
+
+
+def which(name):
+    return shutil.which(name)
+
+
+# ---------------------------------------------------------------------------
+# LLM backend — the machine's already-configured model. Never reach for a
+# cloud key that the user did not set.
+# ---------------------------------------------------------------------------
+
+def resolve_backend() -> tuple[str | None, str]:
+    """Pick the LLM backend.
+
+    An explicitly configured endpoint wins: if the user pointed us at a specific
+    model, honour it. Otherwise prefer the machine's authenticated agent CLI,
+    but only when it is actually usable — an installed-but-unauthenticated codex
+    is worse than useless, because it silently fails every extraction.
+    """
+    if os.environ.get("OMAI_LLM_ENDPOINT"):
+        return "endpoint", os.environ["OMAI_LLM_ENDPOINT"]
+    if which("codex") and codex_ready():
+        return "codex", "codex exec"
+    if which("claude"):
+        return "claude", "claude CLI"
+    if os.environ.get("OMAI_LLM_API_KEY"):
+        return "apikey", "OMAI_LLM_API_KEY"
+    if which("codex"):
+        return None, "codex is installed but NOT logged in — run: codex login"
+    return None, "no LLM configured on this machine"
+
+
+def codex_ready() -> bool:
+    try:
+        proc = subprocess.run(["codex", "login", "status"],
+                              capture_output=True, text=True, timeout=30)
+    except Exception:
+        return False
+    return proc.returncode == 0 and "not logged in" not in proc.stdout.lower()
+
+
+def call_llm(prompt: str, timeout: int = 900) -> tuple[bool, str]:
+    backend, _ = resolve_backend()
+    if backend is None:
+        return False, "no LLM backend available"
+    try:
+        if backend == "codex":
+            proc = subprocess.run(
+                ["codex", "exec", "--skip-git-repo-check", "-"],
+                input=prompt, capture_output=True, text=True, timeout=timeout)
+        elif backend == "claude":
+            proc = subprocess.run(
+                ["claude", "-p", prompt],
+                capture_output=True, text=True, timeout=timeout)
+        elif backend == "endpoint":
+            return call_endpoint(prompt, timeout)
+        else:
+            return False, "api key backend not wired in this version"
+    except subprocess.TimeoutExpired:
+        return False, "llm timed out"
+    except FileNotFoundError as exc:
+        return False, str(exc)
+    if proc.returncode != 0:
+        return False, f"llm exited {proc.returncode}: {proc.stderr[-300:]}"
+    return True, proc.stdout
+
+
+def call_endpoint(prompt: str, timeout: int) -> tuple[bool, str]:
+    import urllib.request
+    endpoint = os.environ["OMAI_LLM_ENDPOINT"].rstrip("/") + "/chat/completions"
+    body = json.dumps({
+        "model": os.environ.get("OMAI_LLM_MODEL", "local"),
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+    }).encode()
+    request = urllib.request.Request(endpoint, data=body,
+                                     headers={"Content-Type": "application/json"})
+    key = os.environ.get("OMAI_LLM_API_KEY")
+    if key:
+        request.add_header("Authorization", f"Bearer {key}")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = json.loads(response.read())
+        return True, payload["choices"][0]["message"]["content"]
+    except Exception as exc:
+        return False, f"endpoint error: {exc}"
+
+
+def parse_json_block(text: str):
+    """LLMs wrap JSON in prose or fences. Extract the first valid object/array."""
+    fence = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
+    if fence:
+        try:
+            return json.loads(fence.group(1).strip())
+        except ValueError:
+            pass
+    for opener, closer in (("[", "]"), ("{", "}")):
+        start = text.find(opener)
+        while start != -1:
+            depth = 0
+            for index in range(start, len(text)):
+                if text[index] == opener:
+                    depth += 1
+                elif text[index] == closer:
+                    depth -= 1
+                    if depth == 0:
+                        try:
+                            return json.loads(text[start:index + 1])
+                        except ValueError:
+                            break
+            start = text.find(opener, start + 1)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# date resolution — keep the raw phrase for audit
+# ---------------------------------------------------------------------------
+
+def resolve_due(basis: str, meeting_date: datetime) -> tuple[str | None, float]:
+    if not basis:
+        return None, 0.0
+    text = basis.lower().strip()
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        return text, 0.99
+    if "today" in text:
+        return meeting_date.date().isoformat(), 0.95
+    if "tomorrow" in text:
+        return (meeting_date + timedelta(days=1)).date().isoformat(), 0.95
+    match = re.search(r"in (\d+) (day|week)s?", text)
+    if match:
+        days = int(match.group(1)) * (7 if match.group(2) == "week" else 1)
+        return (meeting_date + timedelta(days=days)).date().isoformat(), 0.9
+    if "end of week" in text or "eow" in text:
+        ahead = (4 - meeting_date.weekday()) % 7
+        return (meeting_date + timedelta(days=ahead)).date().isoformat(), 0.8
+    if "next week" in text:
+        return (meeting_date + timedelta(days=7 - meeting_date.weekday())).date().isoformat(), 0.75
+    for index, day in enumerate(WEEKDAYS):
+        if day in text:
+            ahead = (index - meeting_date.weekday()) % 7 or 7
+            if "next" in text:
+                ahead += 7
+            return (meeting_date + timedelta(days=ahead)).date().isoformat(), 0.84
+    return None, 0.0
+
+
+# ---------------------------------------------------------------------------
+# prompts
+# ---------------------------------------------------------------------------
+
+PASS1 = """You extract structured facts from meeting transcripts. Output JSON only, no prose.
+
+From the transcript chunk below, extract every candidate item. Favour recall: include
+anything that MIGHT be a commitment, decision, risk or question. Do not judge yet.
+
+For each item output:
+  kind: "commitment" | "decision" | "risk" | "question"
+  speaker: the speaker label exactly as it appears, or null
+  text: a short imperative summary
+  verbatim: the EXACT sentence from the transcript that supports it, copied character for character
+  due_basis: any time phrase used ("by Friday", "next week"), else null
+
+Rules:
+- verbatim MUST be copied exactly from the transcript. Never paraphrase it.
+- If nobody committed to anything, return an empty array.
+- Output a JSON array and nothing else.
+
+TRANSCRIPT CHUNK:
+%s
+"""
+
+PASS2 = """You consolidate extracted meeting items. Output JSON only, no prose.
+
+Merge duplicates, drop pure chatter, and resolve who is responsible.
+Participants in this meeting:
+%s
+
+For each surviving item output:
+  kind, owner_name (or null), text, verbatim, due_basis (or null),
+  confidence: 0.0-1.0 that this is a real, actionable item correctly attributed
+
+Rules:
+- NEVER invent an owner. If it is unclear who committed, owner_name must be null.
+- NEVER invent a due date. If no time was stated, due_basis must be null.
+- Hypotheticals ("we could maybe"), questions and thinking aloud are NOT commitments.
+- Keep verbatim exactly as given.
+- Output a JSON array and nothing else.
+
+CANDIDATE ITEMS:
+%s
+"""
+
+PASS3 = """You are a strict verifier. Output JSON only, no prose.
+
+For each item, decide whether its `verbatim` quote genuinely appears in the transcript
+AND genuinely supports the claim. This prevents fabricated action items.
+
+Output an array of objects:
+  index: the item's position in the input array
+  supported: true or false
+  reason: short explanation when false
+
+Be strict. If the quote is paraphrased, missing, or does not support the claim,
+mark supported=false.
+
+TRANSCRIPT:
+%s
+
+ITEMS:
+%s
+"""
+
+NOTES = """Write concise meeting notes in Markdown. No preamble, no closing remarks.
+
+Use exactly these sections, omitting any that would be empty:
+## Summary
+## Decisions
+## Action Items
+## Open Questions
+## Risks
+
+Action items must be checkboxes in the form:
+- [ ] **Owner** — task — due YYYY-MM-DD
+Use "**Unassigned**" when the owner is unknown. Never invent an owner or a date.
+
+MEETING: %s
+PARTICIPANTS: %s
+
+STRUCTURED ITEMS (authoritative — do not add anything not present here):
+%s
+
+TRANSCRIPT (context only):
+%s
+"""
+
+
+def chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
+    chunks, current = [], []
+    length = 0
+    for line in text.splitlines(keepends=True):
+        if length + len(line) > size and current:
+            chunks.append("".join(current))
+            current, length = [], 0
+        current.append(line)
+        length += len(line)
+    if current:
+        chunks.append("".join(current))
+    return chunks
+
+
+def extract(transcript_md: str, participants: list[dict], meeting: dict) -> dict:
+    """Run the three passes. Returns the structured payload plus diagnostics."""
+    backend, backend_detail = resolve_backend()
+    result = {
+        "commitments": [], "decisions": [], "risks": [], "questions": [],
+        "uncertain": [], "llm": {"backend": backend, "detail": backend_detail},
+        "passes": {},
+    }
+    if backend is None:
+        result["error"] = "no LLM configured; transcript preserved, extraction skipped"
+        return result
+
+    # Pass 1 — high recall per chunk
+    candidates = []
+    chunks = chunk_text(transcript_md)
+    for chunk in chunks:
+        ok, raw = call_llm(PASS1 % chunk)
+        if not ok:
+            result["error"] = f"pass1 failed: {raw[:200]}"
+            return result
+        parsed = parse_json_block(raw)
+        if isinstance(parsed, list):
+            candidates.extend([c for c in parsed if isinstance(c, dict)])
+    result["passes"]["pass1_candidates"] = len(candidates)
+    if not candidates:
+        result["passes"]["note"] = "no candidate items found"
+        return result
+
+    # Pass 2 — consolidate
+    roster = json.dumps([{"name": p.get("name"), "speaker": p.get("speaker"),
+                          "email": p.get("email")} for p in participants])
+    ok, raw = call_llm(PASS2 % (roster, json.dumps(candidates, indent=1)))
+    if not ok:
+        result["error"] = f"pass2 failed: {raw[:200]}"
+        return result
+    consolidated = parse_json_block(raw)
+    if not isinstance(consolidated, list):
+        result["error"] = "pass2 returned unparseable output"
+        return result
+    consolidated = [c for c in consolidated if isinstance(c, dict)]
+    result["passes"]["pass2_consolidated"] = len(consolidated)
+
+    # Pass 3 — verification against literal quotes
+    ok, raw = call_llm(PASS3 % (transcript_md, json.dumps(consolidated, indent=1)))
+    verdicts = parse_json_block(raw) if ok else None
+    supported = {}
+    if isinstance(verdicts, list):
+        for verdict in verdicts:
+            if isinstance(verdict, dict) and "index" in verdict:
+                supported[int(verdict["index"])] = verdict
+    result["passes"]["pass3_verified"] = len(supported)
+
+    # Local corroboration: the quote must actually occur in the transcript.
+    haystack = re.sub(r"\s+", " ", transcript_md).lower()
+
+    def quote_present(quote: str) -> bool:
+        if not quote:
+            return False
+        needle = re.sub(r"\s+", " ", quote).strip().lower()
+        if len(needle) < 8:
+            return False
+        if needle in haystack:
+            return True
+        words = needle.split()
+        if len(words) >= 6:
+            return " ".join(words[:6]) in haystack
+        return False
+
+    meeting_date = datetime.now().astimezone()
+    try:
+        meeting_date = datetime.fromisoformat(
+            meeting.get("actual", {}).get("start") or meeting["scheduled"]["start"])
+    except Exception:
+        pass
+
+    counter = 0
+    for index, item in enumerate(consolidated):
+        counter += 1
+        quote = (item.get("verbatim") or "").strip()
+        verdict = supported.get(index)
+        llm_supported = verdict.get("supported") is True if verdict else None
+        local_supported = quote_present(quote)
+
+        confidence = float(item.get("confidence") or 0.0)
+        if llm_supported is False:
+            confidence = min(confidence, 0.4)
+        if not local_supported:
+            confidence = min(confidence, 0.5)
+
+        due_basis = item.get("due_basis")
+        due_value, due_conf = resolve_due(due_basis or "", meeting_date)
+
+        owner_name = item.get("owner_name")
+        owner = None
+        if owner_name:
+            match = next((p for p in participants
+                          if (p.get("name") or "").lower() == str(owner_name).lower()), None)
+            owner = {"name": owner_name,
+                     "email": (match or {}).get("email"),
+                     "speaker": (match or {}).get("speaker"),
+                     "confidence": (match or {}).get("confidence", 0.5)}
+
+        record = {
+            "id": f"cmt_{counter:04d}",
+            "type": item.get("kind", "commitment"),
+            "owner": owner,
+            "text": item.get("text"),
+            "verbatim": quote,
+            "due": ({"value": due_value, "basis": due_basis, "confidence": due_conf}
+                    if due_basis else None),
+            "status": "open",
+            "confidence": round(confidence, 2),
+            "evidence": {"quote_found_in_transcript": local_supported,
+                         "verifier": llm_supported},
+            "needs_human": owner is None or confidence < AUTO_THRESHOLD,
+        }
+
+        # Unsupported items are dropped from the record, not softened —
+        # but they are never silently discarded.
+        if not local_supported or llm_supported is False:
+            record["dropped_reason"] = (verdict or {}).get("reason") or \
+                "quote not found verbatim in transcript"
+            result["uncertain"].append(record)
+            continue
+        if confidence < REVIEW_THRESHOLD:
+            record["dropped_reason"] = "below confidence floor"
+            result["uncertain"].append(record)
+            continue
+
+        record["autonomy"] = "auto" if confidence >= AUTO_THRESHOLD else "needs_review"
+        bucket = {"commitment": "commitments", "decision": "decisions",
+                  "risk": "risks", "question": "questions"}.get(record["type"], "commitments")
+        result[bucket].append(record)
+
+    return result
+
+
+def write_notes(meeting: dict, participants: list[dict], extracted: dict,
+                transcript_md: str) -> str:
+    """Render human notes FROM the structured record, so the two cannot disagree."""
+    items = json.dumps({k: extracted.get(k, []) for k in
+                        ("commitments", "decisions", "risks", "questions")}, indent=1)
+    roster = ", ".join(p.get("name") or p["speaker"] for p in participants) or "unknown"
+    ok, raw = call_llm(NOTES % (meeting.get("title", "Meeting"), roster, items,
+                                transcript_md[:20000]))
+    if ok and raw.strip():
+        return raw.strip() + "\n"
+
+    # Deterministic fallback so notes exist even when the LLM is unavailable.
+    lines = ["## Summary", "", "_LLM unavailable; notes generated from structured items._", ""]
+    if extracted.get("decisions"):
+        lines += ["## Decisions", ""] + [f"- {d['text']}" for d in extracted["decisions"]] + [""]
+    if extracted.get("commitments"):
+        lines += ["## Action Items", ""]
+        for c in extracted["commitments"]:
+            owner = (c.get("owner") or {}).get("name") or "Unassigned"
+            due = f" — due {c['due']['value']}" if c.get("due") and c["due"].get("value") else ""
+            lines.append(f"- [ ] **{owner}** — {c['text']}{due}")
+        lines.append("")
+    if extracted.get("questions"):
+        lines += ["## Open Questions", ""] + [f"- {q['text']}" for q in extracted["questions"]] + [""]
+    if extracted.get("risks"):
+        lines += ["## Risks", ""] + [f"- {r['text']}" for r in extracted["risks"]] + [""]
+    return "\n".join(lines)
