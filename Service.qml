@@ -4,7 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Headless singleton: runs the detector and exposes recording state. All real
+// Headless singleton: polls status and keeps a heartbeat. All real
 // work happens in bin/omameet-meetings — never in QML, because
 // this runs inside the long-lived omarchy-shell process.
 Item {
@@ -41,11 +41,7 @@ Item {
     }
   }
 
-  Process {
-    id: tickProc
-    command: [root.helper, "tick", "--process"]
-    onExited: { if (!statusProc.running) statusProc.running = true }
-  }
+  Process { id: heartbeatProc; command: [root.helper, "heartbeat"] }
 
   Timer {
     interval: Math.max(15, root.pollIntervalSec) * 1000
@@ -53,7 +49,8 @@ Item {
     repeat: true
     triggeredOnStart: true
     onTriggered: {
-      if (!tickProc.running) tickProc.running = true
+      if (!statusProc.running) statusProc.running = true
+      if (!heartbeatProc.running) heartbeatProc.running = true
     }
   }
 }

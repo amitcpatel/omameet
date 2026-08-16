@@ -1191,7 +1191,7 @@ def cmd_watchdog(args) -> None:
 
 
 TICK_SERVICE = """[Unit]
-Description=omarchy-meetings autopilot tick
+Description=OmaMeet autopilot tick
 
 [Service]
 Type=oneshot
@@ -1199,19 +1199,19 @@ ExecStart={exe} tick --process
 """
 
 TICK_TIMER = """[Unit]
-Description=Run omarchy-meetings autopilot every minute
+Description=Run OmaMeet autopilot every 15 seconds
 
 [Timer]
 OnBootSec=2min
-OnUnitActiveSec=1min
-AccuracySec=15s
+OnUnitActiveSec=15s
+AccuracySec=2s
 
 [Install]
 WantedBy=timers.target
 """
 
 AUDIT_SERVICE = """[Unit]
-Description=omarchy-meetings nightly reconciler
+Description=OmaMeet nightly reconciler
 
 [Service]
 Type=oneshot
@@ -1230,7 +1230,7 @@ WantedBy=timers.target
 """
 
 WATCHDOG_SERVICE = """[Unit]
-Description=omarchy-meetings watchdog
+Description=OmaMeet watchdog
 
 [Service]
 Type=oneshot
@@ -1253,7 +1253,9 @@ def cmd_install_timers(args) -> None:
     """systemd user timers: autopilot tick, nightly audit, hourly watchdog."""
     unit_dir = Path.home() / ".config/systemd/user"
     unit_dir.mkdir(parents=True, exist_ok=True)
-    exe = shutil.which("omarchy-meetings") or str(Path(__file__).resolve())
+    # Always pin units to this plugin's helper. During migration the legacy
+    # omarchy-meetings command may still exist and must not win PATH lookup.
+    exe = str(Path(__file__).resolve())
 
     units = {
         "omarchy-meetings-tick.service": TICK_SERVICE.format(exe=exe),
