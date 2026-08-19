@@ -248,8 +248,8 @@ class HelperTest(unittest.TestCase):
     def test_transcription_defaults_local(self):
         self.assertEqual(self.mod.DEFAULT_CONFIG["transcription"]["backend"], "local")
 
-    def test_llm_source_is_system(self):
-        self.assertEqual(self.mod.DEFAULT_CONFIG["llm"]["source"], "system")
+    def test_ai_notes_default_disabled(self):
+        self.assertEqual(self.mod.DEFAULT_CONFIG["llm"]["backend"], "disabled")
 
     def test_processing_lock_is_exclusive(self):
         """Two processors must never race and overwrite audio audit evidence."""
@@ -326,6 +326,26 @@ class CliTest(unittest.TestCase):
             r = self.run_cli("config", env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertFalse(json.loads(r.stdout)["retainAudio"])
+            self.assertEqual(json.loads(r.stdout)["llm"]["backend"], "disabled")
+
+    def test_ai_opt_in_roundtrip(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = {"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d}
+            enabled = self.run_cli("ai", "enable", "codex", "--json", env=env)
+            self.assertEqual(enabled.returncode, 0, enabled.stderr)
+            self.assertEqual(json.loads(enabled.stdout)["selected"], "codex")
+            status = self.run_cli("ai", "status", "--json", env=env)
+            self.assertTrue(json.loads(status.stdout)["enabled"])
+            disabled = self.run_cli("ai", "disable", "--json", env=env)
+            self.assertEqual(disabled.returncode, 0, disabled.stderr)
+            status = self.run_cli("ai", "status", "--json", env=env)
+            self.assertFalse(json.loads(status.stdout)["enabled"])
+
+    def test_ai_enable_requires_backend(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self.run_cli("ai", "enable",
+                             env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
+            self.assertNotEqual(r.returncode, 0)
 
     def test_stop_without_session_fails_loud(self):
         with tempfile.TemporaryDirectory() as d:
@@ -390,6 +410,15 @@ class AudioRetentionTest(unittest.TestCase):
             self.assertFalse(audio.exists(), "audio should be deleted after full success")
             self.assertTrue(res["verified"])
 
+    def test_ai_disabled_is_successful_local_processing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            extracted = {"commitments": [], "decisions": [],
+                         "llm": {"backend": None},
+                         "passes": {"note": "AI extraction skipped by user preference"}}
+            res, audio = self._write(tmp, extracted)
+            self.assertTrue(res["verified"])
+            self.assertFalse(audio.exists())
+
     def test_retain_audio_flag_overrides_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
             res, audio = self._write(tmp, {"commitments": []}, retain=True)
@@ -447,6 +476,26 @@ class ExtractionTest(unittest.TestCase):
         self.assertEqual(self.e.AUTO_THRESHOLD, 0.85)
         self.assertEqual(self.e.REVIEW_THRESHOLD, 0.60)
 
+    def test_disabled_ai_never_calls_backend(self):
+        original = self.e.call_llm
+        self.e.call_llm = lambda *_args, **_kwargs: self.fail("AI backend was called")
+        try:
+            result = self.e.extract("private transcript", [], {}, "disabled")
+        finally:
+            self.e.call_llm = original
+        self.assertNotIn("error", result)
+        self.assertIsNone(result["llm"]["backend"])
+        self.assertIn("skipped", result["passes"]["note"])
+
+    def test_installed_cli_is_not_implicit_consent(self):
+        original_which = self.e.which
+        self.e.which = lambda _name: "/usr/bin/fake"
+        try:
+            backend, _ = self.e.resolve_backend("disabled")
+        finally:
+            self.e.which = original_which
+        self.assertIsNone(backend)
+
     def test_parses_fenced_json(self):
         parsed = self.e.parse_json_block('sure!\n```json\n[{"a":1}]\n```\nthanks')
         self.assertEqual(parsed, [{"a": 1}])
@@ -462,7 +511,7 @@ class ExtractionTest(unittest.TestCase):
 
     def test_notes_fallback_uses_vault_action_item_format(self):
         original = self.e.call_llm
-        self.e.call_llm = lambda _prompt: (False, "")
+        self.e.call_llm = lambda *_args: (False, "")
         try:
             notes = self.e.write_notes(
                 {"title": "Test"}, [], {

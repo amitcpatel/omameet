@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omarchy-meetings"
-VERSION = "0.3.2"
+VERSION = "0.3.3"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -86,7 +86,7 @@ DEFAULT_CONFIG = {
         "appDenylist": [],
     },
     "transcription": {"backend": "local", "model": "large-v3-turbo", "lang": "en"},
-    "llm": {"source": "system"},
+    "llm": {"backend": "disabled"},
     "notify": {"desktop": True, "joinReminderMin": 5},
     "audit": {"nightly": True, "alertOnMiss": True},
     "retainAudio": False,
@@ -384,9 +384,10 @@ def cmd_doctor(args) -> None:
     check("tool:whisper-cli", which("whisper-cli") or which("whisper-cpp"),
           which("whisper-cli") or which("whisper-cpp") or "MISSING (transcription)")
 
-    # LLM backend resolution order, and whether it can actually be used.
-    backend, detail = resolve_llm()
-    check("llm:backend", backend is not None, detail)
+    # Disabled is a healthy privacy-preserving state. Enabled backends must work.
+    backend, detail = resolve_llm(cfg)
+    selected_backend = cfg.get("llm", {}).get("backend", "disabled")
+    check("llm:backend", selected_backend == "disabled" or backend is not None, detail)
     if backend == "codex":
         code, out, _ = run(["codex", "login", "status"], timeout=30)
         logged_in = code == 0 and "not logged in" not in out.lower()
@@ -462,19 +463,18 @@ def supports_attendees(calendar_path: str) -> bool:
     return '"attendees"' in source and "def attendees" in source
 
 
-def resolve_llm() -> tuple[str | None, str]:
-    """Machine-configured LLM. Never silently reach for a cloud key.
+def resolve_llm(cfg: dict | None = None) -> tuple[str | None, str]:
+    """Resolve the backend explicitly selected in OmaMeet's configuration.
 
     Delegates to lib/extract so doctor and the pipeline can never disagree
     about which backend will actually be used.
     """
     try:
         import extract as _e
-        return _e.resolve_backend()
+        selected = (cfg or config()).get("llm", {}).get("backend", "disabled")
+        return _e.resolve_backend(selected)
     except Exception:
-        if which("codex"):
-            return "codex", "codex exec"
-        return None, "no LLM configured on this machine"
+        return None, "could not resolve configured AI backend"
 
 
 def cmd_next(args) -> None:
@@ -754,6 +754,30 @@ def cmd_config(args) -> None:
     emit(cfg, True)
 
 
+def cmd_ai(args) -> None:
+    """Require an OmaMeet-specific choice before any transcript reaches AI."""
+    cfg = config()
+    if args.action == "enable" and not args.backend:
+        fail("choose an AI backend: codex, claude, or endpoint")
+    if args.action == "status":
+        selected = cfg.get("llm", {}).get("backend", "disabled")
+        backend, detail = resolve_llm(cfg)
+        emit({"enabled": selected != "disabled", "selected": selected,
+              "available": backend is not None, "detail": detail}, args.json,
+             f"AI backend: {selected} — {detail}")
+        return
+    if args.action == "disable":
+        cfg["llm"] = {"backend": "disabled"}
+        save_config(cfg)
+        emit({"enabled": False, "selected": "disabled"}, args.json,
+             "AI notes disabled; transcripts will stay local")
+        return
+    cfg["llm"] = {"backend": args.backend}
+    save_config(cfg)
+    emit({"enabled": True, "selected": args.backend}, args.json,
+         f"AI notes enabled with {args.backend}; meeting transcript text may leave this machine")
+
+
 def vault_dir(cfg: dict) -> Path:
     return Path(cfg["vault"]["path"]).expanduser()
 
@@ -847,8 +871,10 @@ def cmd_process(args) -> None:
     }
 
     # 3. three-pass extraction
-    extracted = E.extract(transcript_md, participants, meeting)
-    notes_body = E.write_notes(meeting, participants, extracted, transcript_md)
+    selected_backend = cfg.get("llm", {}).get("backend", "disabled")
+    extracted = E.extract(transcript_md, participants, meeting, selected_backend)
+    notes_body = E.write_notes(meeting, participants, extracted, transcript_md,
+                               selected_backend)
 
     # 4. write vault; audio deleted only after verification
     result = V.write_meeting(vault_dir(cfg), meeting, participants, conflicts,
@@ -1241,6 +1267,11 @@ def build_parser() -> argparse.ArgumentParser:
     add("status", help="current recording state").set_defaults(func=cmd_status)
     add("heartbeat", help="mark the service alive").set_defaults(func=cmd_heartbeat)
     add("version").set_defaults(func=cmd_version)
+
+    ai = add("ai", help="explicitly enable, disable, or inspect AI notes")
+    ai.add_argument("action", choices=("enable", "disable", "status"))
+    ai.add_argument("backend", nargs="?", choices=("codex", "claude", "endpoint"))
+    ai.set_defaults(func=cmd_ai)
 
     nxt = add("next", help="today's meetings and whether they'll be recorded")
     nxt.add_argument("--date")

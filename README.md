@@ -86,8 +86,8 @@ Calendar and joining features need only Python 3.11+. Meeting capture adds:
 
 - `ffmpeg`, `ffprobe`, `pactl`, and `pw-cli`;
 - `whisper-cli` or `whisper-cpp` plus a local model;
-- one notes backend: authenticated Codex CLI, Claude CLI, or an
-  OpenAI-compatible `/chat/completions` endpoint.
+- optionally, one explicitly enabled notes backend: authenticated Codex CLI,
+  Claude CLI, or an OpenAI-compatible `/chat/completions` endpoint.
 
 The plugin store intentionally does not run install hooks. To add convenient
 command links, run the repository's safe setup script:
@@ -112,12 +112,13 @@ Set the output directory in `~/.config/omarchy-meetings/config.json`:
 The destination can be an Obsidian vault, ordinary directory, Dropbox folder,
 Syncthing folder, or Git repository. Each meeting gets its own directory with:
 
-- `notes.md` — AI-generated notes, decisions, action items, next steps, and risks;
+- `notes.md` — AI-generated notes when explicitly enabled, otherwise a
+  local-only processing marker;
 - `transcript.md` — timestamped transcript;
 - `meeting.json` — structured facts and processing evidence.
 
-Audio is deleted only after transcription, extraction, and output writes are
-verified. A failed run retains its recording for recovery.
+Audio is deleted only after local transcription and output writes are verified,
+plus AI extraction when enabled. A failed run retains its recording for recovery.
 
 ### Recording behavior
 
@@ -146,8 +147,22 @@ omameet-meetings audit --json
 
 ### AI backend
 
-OmaMeet selects `OMAI_LLM_ENDPOINT`, then an authenticated Codex CLI, then the
-Claude CLI. For a compatible endpoint:
+AI notes are disabled by default. OmaMeet never treats an installed or
+authenticated CLI as consent to share a transcript. Enable a specific backend
+only after deciding that its data handling is appropriate:
+
+```bash
+omameet-meetings ai enable codex
+omameet-meetings ai enable claude
+omameet-meetings ai enable endpoint
+omameet-meetings ai status --json
+omameet-meetings ai disable
+```
+
+Enabling a backend permits OmaMeet to pass meeting transcript text to that
+backend. Codex and Claude may use remote services according to their own
+configuration. For a compatible endpoint, set its environment before enabling
+it:
 
 ```bash
 export OMAI_LLM_ENDPOINT="http://127.0.0.1:11434/v1"
@@ -155,8 +170,9 @@ export OMAI_LLM_MODEL="your-model-name"
 export OMAI_LLM_API_KEY="optional-bearer-token"
 ```
 
-Without a notes backend, OmaMeet keeps the recording and transcript so they can
-be processed later.
+With AI disabled, OmaMeet completes local transcription normally and writes a
+local-only `notes.md` marker plus `transcript.md`. No transcript is passed to
+Codex, Claude, or an HTTP endpoint.
 
 ## Privacy and security
 
@@ -165,8 +181,9 @@ be processed later.
 - Never commit OAuth credentials, private calendar URLs, recordings,
   transcripts, or generated notes.
 - Calendar data, capture, and transcription stay local.
-- Transcript text leaves the machine only when you configure a cloud notes
-  backend. Files sync only when you choose a synced output directory.
+- Transcript text is never passed to an AI backend unless you explicitly run
+  `omameet-meetings ai enable BACKEND`. Files sync only when you choose a
+  synced output directory.
 - Use recording features in accordance with participant consent, workplace
   policy, and applicable law.
 
@@ -190,5 +207,5 @@ qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Service.qml
 python3 -m unittest discover -s tests -v
 ```
 
-OmaMeet is MIT licensed. Version 0.3.2 removes the legacy timer installer and
-watchdog notification; the native Omarchy service is the only automatic detector.
+OmaMeet is MIT licensed. Version 0.3.3 requires an OmaMeet-specific opt-in before
+any AI backend can receive transcript text.

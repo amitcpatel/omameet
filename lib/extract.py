@@ -33,29 +33,27 @@ def which(name):
 
 
 # ---------------------------------------------------------------------------
-# LLM backend — the machine's already-configured model. Never reach for a
-# cloud key that the user did not set.
+# LLM backend — selected explicitly in OmaMeet's own configuration.
 # ---------------------------------------------------------------------------
 
-def resolve_backend() -> tuple[str | None, str]:
-    """Pick the LLM backend.
-
-    An explicitly configured endpoint wins: if the user pointed us at a specific
-    model, honour it. Otherwise prefer the machine's authenticated agent CLI,
-    but only when it is actually usable — an installed-but-unauthenticated codex
-    is worse than useless, because it silently fails every extraction.
-    """
-    if os.environ.get("OMAI_LLM_ENDPOINT"):
-        return "endpoint", os.environ["OMAI_LLM_ENDPOINT"]
-    if which("codex") and codex_ready():
-        return "codex", "codex exec"
-    if which("claude"):
-        return "claude", "claude CLI"
-    if os.environ.get("OMAI_LLM_API_KEY"):
-        return "apikey", "OMAI_LLM_API_KEY"
-    if which("codex"):
-        return None, "codex is installed but NOT logged in — run: codex login"
-    return None, "no LLM configured on this machine"
+def resolve_backend(selected: str = "disabled") -> tuple[str | None, str]:
+    """Resolve only the backend the user explicitly enabled for OmaMeet."""
+    if selected == "disabled":
+        return None, "AI notes disabled; transcript stays local"
+    if selected == "endpoint":
+        endpoint = os.environ.get("OMAI_LLM_ENDPOINT")
+        return (("endpoint", endpoint) if endpoint else
+                (None, "endpoint selected but OMAI_LLM_ENDPOINT is not set"))
+    if selected == "codex":
+        if not which("codex"):
+            return None, "Codex selected but not installed"
+        if not codex_ready():
+            return None, "Codex selected but not logged in — run: codex login"
+        return "codex", "codex exec (explicit OmaMeet opt-in)"
+    if selected == "claude":
+        return (("claude", "claude CLI (explicit OmaMeet opt-in)") if which("claude")
+                else (None, "Claude selected but not installed"))
+    return None, f"unsupported AI backend: {selected}"
 
 
 def codex_ready() -> bool:
@@ -67,8 +65,8 @@ def codex_ready() -> bool:
     return proc.returncode == 0 and "not logged in" not in proc.stdout.lower()
 
 
-def call_llm(prompt: str, timeout: int = 900) -> tuple[bool, str]:
-    backend, _ = resolve_backend()
+def call_llm(prompt: str, backend: str = "disabled", timeout: int = 900) -> tuple[bool, str]:
+    backend, _ = resolve_backend(backend)
     if backend is None:
         return False, "no LLM backend available"
     try:
@@ -288,23 +286,27 @@ def chunk_text(text: str, size: int = CHUNK_CHARS) -> list[str]:
     return chunks
 
 
-def extract(transcript_md: str, participants: list[dict], meeting: dict) -> dict:
+def extract(transcript_md: str, participants: list[dict], meeting: dict,
+            selected_backend: str = "disabled") -> dict:
     """Run the three passes. Returns the structured payload plus diagnostics."""
-    backend, backend_detail = resolve_backend()
+    backend, backend_detail = resolve_backend(selected_backend)
     result = {
         "commitments": [], "decisions": [], "risks": [], "questions": [],
         "uncertain": [], "llm": {"backend": backend, "detail": backend_detail},
         "passes": {},
     }
+    if selected_backend == "disabled":
+        result["passes"]["note"] = "AI extraction skipped by user preference"
+        return result
     if backend is None:
-        result["error"] = "no LLM configured; transcript preserved, extraction skipped"
+        result["error"] = backend_detail
         return result
 
     # Pass 1 — high recall per chunk
     candidates = []
     chunks = chunk_text(transcript_md)
     for chunk in chunks:
-        ok, raw = call_llm(PASS1 % chunk)
+        ok, raw = call_llm(PASS1 % chunk, backend)
         if not ok:
             result["error"] = f"pass1 failed: {raw[:200]}"
             return result
@@ -319,7 +321,7 @@ def extract(transcript_md: str, participants: list[dict], meeting: dict) -> dict
     # Pass 2 — consolidate
     roster = json.dumps([{"name": p.get("name"), "speaker": p.get("speaker"),
                           "email": p.get("email")} for p in participants])
-    ok, raw = call_llm(PASS2 % (roster, json.dumps(candidates, indent=1)))
+    ok, raw = call_llm(PASS2 % (roster, json.dumps(candidates, indent=1)), backend)
     if not ok:
         result["error"] = f"pass2 failed: {raw[:200]}"
         return result
@@ -331,7 +333,7 @@ def extract(transcript_md: str, participants: list[dict], meeting: dict) -> dict
     result["passes"]["pass2_consolidated"] = len(consolidated)
 
     # Pass 3 — verification against literal quotes
-    ok, raw = call_llm(PASS3 % (transcript_md, json.dumps(consolidated, indent=1)))
+    ok, raw = call_llm(PASS3 % (transcript_md, json.dumps(consolidated, indent=1)), backend)
     verdicts = parse_json_block(raw) if ok else None
     supported = {}
     if isinstance(verdicts, list):
@@ -426,18 +428,21 @@ def extract(transcript_md: str, participants: list[dict], meeting: dict) -> dict
 
 
 def write_notes(meeting: dict, participants: list[dict], extracted: dict,
-                transcript_md: str) -> str:
+                transcript_md: str, selected_backend: str = "disabled") -> str:
     """Render human notes FROM the structured record, so the two cannot disagree."""
     items = json.dumps({k: extracted.get(k, []) for k in
                         ("commitments", "decisions", "risks", "questions")}, indent=1)
     roster = ", ".join(p.get("name") or p["speaker"] for p in participants) or "unknown"
     ok, raw = call_llm(NOTES % (meeting.get("title", "Meeting"), roster, items,
-                                transcript_md[:20000]))
+                                transcript_md[:20000]), selected_backend)
     if ok and raw.strip():
         return raw.strip() + "\n"
 
     # Deterministic fallback so notes exist even when the LLM is unavailable.
-    lines = ["## Notes", "", "_LLM unavailable; notes generated from structured items._", ""]
+    reason = ("AI notes disabled; transcript processed locally."
+              if selected_backend == "disabled"
+              else "AI unavailable; notes generated from structured items.")
+    lines = ["## Notes", "", f"_{reason}_", ""]
     if extracted.get("decisions"):
         lines += ["## Decisions", ""] + [f"- {d['text']}" for d in extracted["decisions"]] + [""]
     if extracted.get("commitments"):
