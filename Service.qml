@@ -4,7 +4,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 
-// Headless singleton: polls status and keeps a heartbeat. All real
+// Headless singleton: polls status and runs the meeting detector. All real
 // work happens in bin/omameet-meetings — never in QML, because
 // this runs inside the long-lived omarchy-shell process.
 Item {
@@ -41,7 +41,18 @@ Item {
     }
   }
 
-  Process { id: heartbeatProc; command: [root.helper, "heartbeat"] }
+  // This is the store-safe automation path: Omarchy does not run install hooks,
+  // so the enabled service owns detection without requiring systemd setup.
+  Process {
+    id: detectorProc
+    command: [root.helper, "tick", "--process", "--json"]
+    onExited: function(code) {
+      if (code !== 0 && root.meetingState !== "recording") {
+        root.meetingState = "error"
+        root.detail = "meeting detector failed"
+      }
+    }
+  }
 
   Timer {
     interval: Math.max(15, root.pollIntervalSec) * 1000
@@ -50,7 +61,7 @@ Item {
     triggeredOnStart: true
     onTriggered: {
       if (!statusProc.running) statusProc.running = true
-      if (!heartbeatProc.running) heartbeatProc.running = true
+      if (!detectorProc.running) detectorProc.running = true
     }
   }
 }

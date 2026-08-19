@@ -1,10 +1,10 @@
 """Autopilot: decide when to record, without a human touching anything.
 
-Defence in depth — four independent triggers plus a reconciler, because the
-failure that matters is a meeting happening and nothing being recorded.
+Microphone activity is the automatic trigger. Calendar and window state add
+context, and a reconciler catches misses.
 
-  1. calendar poll        scheduled meetings
-  2. audio activity       ad-hoc / inbound calls the calendar never knew about
+  1. audio activity       supported meeting app actively using the microphone
+  2. calendar poll        context only; never starts recording by itself
   3. window class         confirmation only, never a trigger on its own
   4. manual               always available
 
@@ -82,6 +82,24 @@ def meeting_app_active(cfg: dict) -> tuple[bool, str | None]:
     return False, None
 
 
+def event_matches_capture_app(event: dict, app: str | None) -> bool:
+    """Use calendar metadata only when its platform agrees with the mic owner.
+
+    Browser microphone activity can be any tab. Restrict browser correlation to
+    Google Meet so an overlapping Zoom/Teams calendar event cannot mislabel an
+    unrelated Meet call.
+    """
+    client = (app or "").lower()
+    url = (event.get("joinUrl") or "").lower()
+    if any(name in client for name in ("chrome", "chromium", "brave", "firefox", "edge")):
+        return "meet.google" in url
+    if "zoom" in client:
+        return "zoom." in url
+    if "teams" in client:
+        return "teams." in url or "teams.microsoft" in url
+    return False
+
+
 # ---------------------------------------------------------------------------
 # trigger 3 — window class, confirmation only
 # ---------------------------------------------------------------------------
@@ -103,7 +121,7 @@ def active_window_class() -> str | None:
 # ---------------------------------------------------------------------------
 
 def due_event(events: list[dict], cfg, qualifies, now: datetime) -> dict | None:
-    """The event we should be recording right now, if any."""
+    """The event that can label an active call; never a recording trigger alone."""
     lookahead = timedelta(seconds=cfg["capture"]["lookaheadSec"])
     for event in events:
         ok, _ = qualifies(event, cfg)

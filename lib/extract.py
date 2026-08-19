@@ -238,18 +238,30 @@ ITEMS:
 %s
 """
 
-NOTES = """Write concise meeting notes in Markdown. No preamble, no closing remarks.
+NOTES = """Write concise Obsidian meeting notes in Markdown. Match the established
+Granola meeting-note style in this vault: scannable topic-based notes followed by
+explicit outcomes. No preamble, no closing remarks, and no transcript-style retelling.
 
-Use exactly these sections, omitting any that would be empty:
-## Summary
+Use these sections in this order, omitting any that would be empty:
+## Notes
+### <descriptive topic heading>
 ## Decisions
 ## Action Items
+## Next Steps
 ## Open Questions
 ## Risks
 
+Under ## Notes, group the substantive discussion beneath descriptive ### topic
+headings. Use compact bullets, bolding important names/terms/numbers when helpful.
+Do not use a generic heading such as "Discussion" when a specific topic is known.
+
 Action items must be checkboxes in the form:
-- [ ] **Owner** — task — due YYYY-MM-DD
-Use "**Unassigned**" when the owner is unknown. Never invent an owner or a date.
+- [ ] Owner → task 📅 YYYY-MM-DD
+Omit the date suffix when no due date was stated. Use "Unassigned" when the owner
+is unknown. Never invent an owner or a date.
+
+Next Steps should synthesize the immediate sequence or follow-through already
+supported by the structured items. Do not introduce new work.
 
 MEETING: %s
 PARTICIPANTS: %s
@@ -425,15 +437,15 @@ def write_notes(meeting: dict, participants: list[dict], extracted: dict,
         return raw.strip() + "\n"
 
     # Deterministic fallback so notes exist even when the LLM is unavailable.
-    lines = ["## Summary", "", "_LLM unavailable; notes generated from structured items._", ""]
+    lines = ["## Notes", "", "_LLM unavailable; notes generated from structured items._", ""]
     if extracted.get("decisions"):
         lines += ["## Decisions", ""] + [f"- {d['text']}" for d in extracted["decisions"]] + [""]
     if extracted.get("commitments"):
         lines += ["## Action Items", ""]
         for c in extracted["commitments"]:
             owner = (c.get("owner") or {}).get("name") or "Unassigned"
-            due = f" — due {c['due']['value']}" if c.get("due") and c["due"].get("value") else ""
-            lines.append(f"- [ ] **{owner}** — {c['text']}{due}")
+            due = f" 📅 {c['due']['value']}" if c.get("due") and c["due"].get("value") else ""
+            lines.append(f"- [ ] {owner} → {c['text']}{due}")
         lines.append("")
     if extracted.get("questions"):
         lines += ["## Open Questions", ""] + [f"- {q['text']}" for q in extracted["questions"]] + [""]

@@ -1,155 +1,192 @@
 # OmaMeet
 
-OmaMeet is one native Omarchy Shell plugin for the whole meeting lifecycle:
-calendar, one-click joining, automatic audio capture, local transcription,
-AI summaries, action items, and Obsidian notes.
+OmaMeet puts your day on the Omarchy bar: a fast, private calendar with
+one-click meeting joins and optional local recording, transcription, and notes.
 
-It combines the calendar and meeting-recorder workflows into a single bar
-widget: see what is next, join it, capture it, and find the finished notes in
-Obsidian without moving files by hand.
+It is useful before any meeting automation is configured. Add a private
+iCalendar subscription, see the day at a glance, and join Google Meet, Zoom,
+Teams, or Webex without opening a calendar tab.
 
-## How it works
+## Why it belongs in Omarchy
 
-- The themed day view aggregates multiple Google Calendar accounts.
-- Clicking **Join** starts capture before opening Google Meet, Zoom, Teams, or Webex.
-- Five minutes before a qualifying meeting, OmaMeet shows a one-time desktop
-  notification labeled **JOIN ›**. Omarchy notifications use the whole card as
-  the action: clicking it starts capture and opens the meeting URL.
-- The background service also catches qualifying scheduled and unplanned calls.
-- After a recognized meeting app stops capturing the microphone for 90 seconds,
-  OmaMeet stops and processes the recording. Five minutes of silence is the
-  fallback.
-- `notes.md`, `transcript.md`, and `meeting.json` are written to the configured
-  Obsidian Meetings folder.
-
-The bar uses a calendar-check icon when idle and the theme's urgent recording
-indicator while capture is active.
-
-## Requirements
-
-- Omarchy 4+
-- Python 3.11+
-- `ffmpeg`, `pactl`, and `whisper-cli`
-- `secret-tool` from `libsecret`
-- Google OAuth Desktop client with Calendar API enabled
-- A configured Codex CLI for AI extraction (or another supported backend)
-
-OmaMeet currently reuses the proven local state from its predecessors so an
-upgrade does not lose accounts, preferences, or recordings:
-
-- Calendar credentials and preferences: `~/.config/omarchy-calendar` and
-  `~/.local/state/omarchy-calendar`
-- Capture configuration and state: `~/.config/omarchy-meetings` and
-  `~/.local/state/omarchy-meetings`
-
-Place the Google OAuth JSON at
-`~/.config/omarchy-calendar/client_secret.json` and protect it with mode 600.
+- It turns the bar into a calm, native day planner instead of another web app.
+- It follows the active Omarchy theme and shell panel behavior.
+- Calendar subscriptions work without a Google Cloud project or OAuth consent
+  screen.
+- Calendar reads, audio capture, and transcription happen locally. Cloud AI is
+  optional and explicit.
+- Calendar time never starts a recording. Automatic capture requires a known
+  meeting application to be actively using the microphone.
 
 ## Install
 
+OmaMeet requires Omarchy 4 (Quattro).
+
 ```bash
-git clone https://github.com/amitcpatel/omameet.git
-cd omameet
-./install.sh
-omameet-calendar account add
+omarchy plugin add https://github.com/amitcpatel/omameet.git --enable
 ```
 
-Right-click the bar widget to manage accounts, calendar visibility, and event
-priority. Middle-click refreshes the agenda.
+The widget appears on the right side of the bar. Left-click opens the day,
+middle-click refreshes it, and right-click opens calendar settings.
 
-The installer adds and enables `acp.omameet`, exposes the two command-line
-helpers in `~/.local/bin`, and keeps the plugin linked to the checked-out
-repository. Install the background automation with:
+No setup script or background timer is required for the calendar. The enabled
+Omarchy service handles refreshes, reminders, and meeting detection.
+
+## Add a calendar without Google Cloud
+
+Right-click the OmaMeet icon and paste a private iCalendar subscription URL.
+You can find this URL in most calendar products under names such as **Secret
+address in iCal format**, **Private calendar URL**, or **Subscribe**.
+
+OmaMeet accepts `https://`, `webcal://`, and local `.ics` files. It supports
+timed and all-day events, folded fields, time zones, exclusions, additional
+dates, and common daily, weekly, monthly, and yearly recurrence rules.
+
+You can also add a source from the command line after enabling the optional
+command links described below:
 
 ```bash
-omameet-meetings install-timers
+omameet-calendar source add 'https://example.com/private/calendar.ics' --name Personal
+omameet-calendar source list
+omameet-calendar source remove SOURCE_ID
 ```
 
-## Configure
+Subscription URLs often contain a secret token. OmaMeet stores them in
+`~/.local/state/omarchy-calendar/feeds.json` with mode `600`, never displays
+them in the UI or `source list`, and only accepts encrypted remote URLs.
 
-Initialize and inspect the effective meeting configuration:
+## Optional Google Calendar connection
+
+The iCalendar path is recommended for the simplest read-only setup. Connect the
+Google Calendar API only if you need multiple Google calendars with attendee
+metadata and per-calendar controls.
+
+1. In Google Cloud, create a project and enable **Google Calendar API**.
+2. Configure an OAuth consent screen and add `openid`, `email`, and
+   `https://www.googleapis.com/auth/calendar.readonly`.
+3. Create a **Desktop app** OAuth client.
+4. Save its JSON with private permissions:
+
+   ```bash
+   mkdir -p ~/.config/omarchy-calendar
+   install -m 600 ~/Downloads/client_secret_*.json \
+     ~/.config/omarchy-calendar/client_secret.json
+   ```
+
+5. Run `omameet-calendar account add`, or click **Google** in OmaMeet's
+   calendar settings.
+
+OAuth uses PKCE and a temporary loopback redirect. Refresh tokens live in the
+desktop keyring through `secret-tool`; calendar access is read-only.
+
+## Optional meeting notes
+
+Calendar and joining features need only Python 3.11+. Meeting capture adds:
+
+- `ffmpeg`, `ffprobe`, `pactl`, and `pw-cli`;
+- `whisper-cli` or `whisper-cpp` plus a local model;
+- one notes backend: authenticated Codex CLI, Claude CLI, or an
+  OpenAI-compatible `/chat/completions` endpoint.
+
+The plugin store intentionally does not run install hooks. To add convenient
+command links, run the repository's safe setup script:
 
 ```bash
+~/.config/omarchy/plugins/acp.omameet/install.sh
 omameet-meetings config --init
-omameet-meetings config --json
+omameet-meetings fetch-model base.en
 omameet-meetings doctor --json
 ```
 
-Meeting settings live in `~/.config/omarchy-meetings/config.json`. Set
-`vault.path` to the Meetings folder inside the Obsidian vault open on the
-machine. For example:
+Set the output directory in `~/.config/omarchy-meetings/config.json`:
 
 ```json
 {
   "vault": {
-    "path": "~/Documents/Projects/Knowledge/Meetings"
-  },
-  "notify": {
-    "desktop": true,
-    "joinReminderMin": 5
+    "path": "~/Documents/Meeting Notes"
   }
 }
 ```
 
-Values omitted from this file retain their built-in defaults.
+The destination can be an Obsidian vault, ordinary directory, Dropbox folder,
+Syncthing folder, or Git repository. Each meeting gets its own directory with:
 
-## Automation
+- `notes.md` — notes, decisions, action items, next steps, and risks;
+- `transcript.md` — timestamped transcript;
+- `meeting.json` — structured facts and processing evidence.
 
-OmaMeet checks the agenda and active meeting applications every 15 seconds.
-Scheduled meetings with supported join URLs can start automatically. It also
-recognizes active Zoom, Google Meet, Microsoft Teams, and Webex calls from the
-desktop audio/window signals. Clicking **Join** in the panel or reminder starts
-recording before the URL is opened.
+Audio is deleted only after transcription, extraction, and output writes are
+verified. A failed run retains its recording for recovery.
 
-When the meeting application stops publishing its microphone stream, OmaMeet
-waits 90 seconds before stopping. A five-minute silence limit is the safety
-fallback. The completed recording is then transcribed, summarized, and written
-to Obsidian. Recording consent remains the user's responsibility.
+### Recording behavior
+
+- Clicking **Join** starts capture before opening the meeting URL.
+- Automatic capture requires a supported meeting app to own an active
+  microphone stream; a scheduled event alone is never enough.
+- Calendar context is attached only when its meeting platform matches the
+  active app.
+- Unplanned calls prompt by default. Set `detection.autoRecordUnplanned` to
+  `true` only if that behavior and local consent rules are appropriate.
+- Capture ends 90 seconds after the app releases the microphone. Five minutes
+  of silence is the fallback.
+
+Recording consent remains the user's responsibility.
 
 Useful controls:
 
 ```bash
 omameet-meetings status --json
-omameet-meetings pause
-omameet-meetings pause --off
 omameet-meetings record start --title "Meeting"
 omameet-meetings record stop
-omameet-meetings next --json
+omameet-meetings pause
+omameet-meetings pause --off
+omameet-meetings audit --json
 ```
 
-## Obsidian output
+### AI backend
 
-Each meeting receives its own timestamped directory under `vault.path`:
+OmaMeet selects `OMAI_LLM_ENDPOINT`, then an authenticated Codex CLI, then the
+Claude CLI. For a compatible endpoint:
 
-- `notes.md` — summary, decisions, action items, and follow-ups
-- `transcript.md` — the raw transcript
-- `meeting.json` — structured meeting data for automation and querying
+```bash
+export OMAI_LLM_ENDPOINT="http://127.0.0.1:11434/v1"
+export OMAI_LLM_MODEL="your-model-name"
+export OMAI_LLM_API_KEY="optional-bearer-token"
+```
 
-Audio is deleted only after the transcript, extraction, and vault write are
-verified. If AI extraction fails, OmaMeet preserves both the transcript and the
-audio so the meeting can be processed again.
+Without a notes backend, OmaMeet keeps the recording and transcript so they can
+be processed later.
 
-## Validate
+## Privacy and security
+
+- Plugins run unsandboxed with your user permissions. Review the source before
+  enabling any Omarchy plugin.
+- Never commit OAuth credentials, private calendar URLs, recordings,
+  transcripts, or generated notes.
+- Calendar data, capture, and transcription stay local.
+- Transcript text leaves the machine only when you configure a cloud notes
+  backend. Files sync only when you choose a synced output directory.
+- Use recording features in accordance with participant consent, workplace
+  policy, and applicable law.
+
+## Remove
+
+```bash
+~/.config/omarchy/plugins/acp.omameet/uninstall.sh
+omarchy plugin remove acp.omameet
+```
+
+Removal keeps settings, calendar sources, recordings, and notes. Delete
+`~/.config/omarchy-calendar`, `~/.local/state/omarchy-calendar`,
+`~/.config/omarchy-meetings`, and `~/.local/state/omarchy-meetings` yourself
+only if you also want to erase that data.
+
+## Development and release checks
 
 ```bash
 omarchy plugin validate .
+qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Service.qml
 python3 -m unittest discover -s tests -v
 ```
 
-For an installed copy, `omameet-meetings doctor --json` verifies the audio
-devices, transcription model, AI backend, calendar access, and vault path.
-
-## Release status
-
-Version 0.2.0 is the first combined OmaMeet release. The repository contains
-the Omarchy manifest, bar widget, panel, background service, installer, meeting
-and calendar helpers, processing libraries, and automated tests required to
-publish the plugin. No OAuth secrets, recordings, transcripts, or vault notes
-belong in this repository.
-
-## Privacy
-
-Calendar data, credentials, raw audio, transcripts, and notes remain on this
-machine unless the configured Obsidian vault syncs them. Automatic recording
-must be used in accordance with the consent laws and policies that apply to the
-meeting participants.
+OmaMeet is MIT licensed. Version 0.3.0 is the first plugin-marketplace release.

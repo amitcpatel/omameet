@@ -25,6 +25,8 @@ Panel {
   property string selectedDate: todayKey()
   property bool recording: false
   property string recordingTitle: ""
+  property string sourceName: ""
+  property string sourceUrl: ""
 
   readonly property string calendarHelper:
       Qt.resolvedUrl("bin/omameet-calendar").toString().replace("file://", "")
@@ -99,6 +101,13 @@ Panel {
     } catch (e) { errorText = "Could not read calendar data" }
   }
   function loadCalendars() { if (!calendarListProcess.running) calendarListProcess.running = true }
+  function addIcalSource() {
+    var value = sourceUrl.trim()
+    if (!value || addSourceProcess.running) return
+    addSourceProcess.command = [calendarHelper, "source", "add", value]
+    if (sourceName.trim()) addSourceProcess.command.push("--name", sourceName.trim())
+    addSourceProcess.running = true
+  }
   function applyCalendars(value) {
     try {
       var payload = JSON.parse(String(value || "{}"))
@@ -275,6 +284,17 @@ Panel {
       else root.errorText = "Could not add Google account"
     }
   }
+  Process {
+    id: addSourceProcess
+    onExited: function(code) {
+      if (code === 0) {
+        root.sourceName = ""
+        root.sourceUrl = ""
+        root.loadCalendars()
+        root.refresh(true)
+      } else root.errorText = "Could not add iCalendar source — check the URL and try again"
+    }
+  }
   Timer { interval: root.refreshIntervalSec * 1000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refresh(true) }
   Timer { interval: 30000; repeat: true; running: true; onTriggered: root.nowMs = Date.now() }
   Timer { interval: 5000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refreshRecording() }
@@ -332,8 +352,8 @@ Panel {
           anchors.rightMargin: Style.spacing.panelPadding
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.spacing.sm
-          Text { width: parent.width - addAccountButton.width - doneButton.width - parent.spacing * 2; anchors.verticalCenter: parent.verticalCenter; text: "Calendar Settings"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight }
-          Button { id: addAccountButton; anchors.verticalCenter: parent.verticalCenter; text: addAccountProcess.running ? "Connecting…" : "Add account"; foreground: root.foreground; accent: root.accent; enabled: !addAccountProcess.running; bordered: true; onClicked: addAccountProcess.running = true }
+          Text { width: parent.width - addAccountButton.width - doneButton.width - parent.spacing * 2; anchors.verticalCenter: parent.verticalCenter; text: "Calendars"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight }
+          Button { id: addAccountButton; anchors.verticalCenter: parent.verticalCenter; text: addAccountProcess.running ? "Connecting…" : "Google"; tooltipText: "Connect a Google Calendar account"; foreground: root.foreground; accent: root.accent; enabled: !addAccountProcess.running; bordered: true; onClicked: addAccountProcess.running = true }
           Button { id: doneButton; anchors.verticalCenter: parent.verticalCenter; text: "Done"; foreground: root.foreground; accent: root.accent; selected: true; onClicked: { root.showingCalendars = false; root.refresh(false); Qt.callLater(root.scrollToNow) } }
         }
       }
@@ -360,7 +380,19 @@ Panel {
           spacing: Style.spacing.sm
           topPadding: Style.spacing.xxl
           bottomPadding: Style.spacing.xxl
-          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.md; text: "Choose visibility and cycle each calendar's priority"; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.sm; text: "Add a private iCalendar subscription — no Google Cloud project required"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.Wrap }
+          Row {
+            width: parent.width
+            leftPadding: Style.spacing.panelPadding
+            rightPadding: Style.spacing.panelPadding
+            spacing: Style.spacing.sm
+            TextField { id: sourceNameField; width: Style.space(120); placeholderText: "Name"; text: root.sourceName; foreground: root.foreground; accent: root.accent; onTextChanged: root.sourceName = text }
+            TextField { id: sourceUrlField; width: parent.width - sourceNameField.width - addSourceButton.width - parent.spacing * 2 - parent.leftPadding - parent.rightPadding; placeholderText: "https://…/calendar.ics"; text: root.sourceUrl; foreground: root.foreground; accent: root.accent; onTextChanged: root.sourceUrl = text; onAccepted: root.addIcalSource() }
+            Button { id: addSourceButton; text: addSourceProcess.running ? "Adding…" : "Add"; foreground: root.foreground; accent: root.accent; selected: root.sourceUrl.trim() !== ""; enabled: root.sourceUrl.trim() !== "" && !addSourceProcess.running; onClicked: root.addIcalSource() }
+          }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; topPadding: Style.spacing.md; bottomPadding: Style.spacing.md; text: "Use the secret subscription URL from Google Calendar, iCloud, Fastmail, Outlook, or another calendar provider. OmaMeet stores it locally with private permissions."; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap }
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; topPadding: Style.spacing.lg; bottomPadding: Style.spacing.md; text: "Choose visibility and cycle each calendar's priority"; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           Repeater {
             model: root.calendars
             delegate: Item {
@@ -519,7 +551,7 @@ Panel {
             visible: !root.loading && root.errorText === "" && (!root.agenda.events || root.agenda.events.length === 0)
             width: parent.width
             height: visible ? Style.space(150) : 0
-            Column { anchors.centerIn: parent; spacing: Style.spacing.md; Text { anchors.horizontalCenter: parent.horizontalCenter; text: "✓"; color: root.accent; font.pixelSize: Style.font.displayLarge } Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.agenda.accounts && root.agenda.accounts.length ? "Your day is clear" : "Connect a Google account"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true } }
+            Column { anchors.centerIn: parent; spacing: Style.spacing.md; Text { anchors.horizontalCenter: parent.horizontalCenter; text: "✓"; color: root.accent; font.pixelSize: Style.font.displayLarge } Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.agenda.accounts && root.agenda.accounts.length ? "Your day is clear" : "Add a calendar to begin"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true } }
           }
         }
         }

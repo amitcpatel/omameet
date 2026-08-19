@@ -16,6 +16,98 @@ def load_module():
 
 
 class CalendarTests(unittest.TestCase):
+    def test_ical_parses_folded_text_and_meeting_link(self):
+        calendar = load_module()
+        feed = {"id": "work", "name": "Work", "source": "file:///unused"}
+        text = """BEGIN:VCALENDAR\r
+BEGIN:VEVENT\r
+UID:standup\r
+DTSTART:20260819T130000Z\r
+DTEND:20260819T133000Z\r
+SUMMARY:Team stand\r
+ up\r
+DESCRIPTION:Join https://meet.google.com/abc-defg-hij\r
+END:VEVENT\r
+END:VCALENDAR\r
+"""
+        original = calendar.read_ical_source
+        calendar.read_ical_source = lambda _: text
+        try:
+            events = calendar.ical_events(feed, calendar.date(2026, 8, 19))
+        finally:
+            calendar.read_ical_source = original
+        self.assertEqual(events[0]["title"], "Team standup")
+        self.assertEqual(events[0]["joinUrl"], "https://meet.google.com/abc-defg-hij")
+        self.assertEqual(events[0]["calendarLabel"], "Work")
+
+    def test_ical_all_day_and_exdate(self):
+        calendar = load_module()
+        text = """BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:holiday
+DTSTART;VALUE=DATE:20260819
+DTEND;VALUE=DATE:20260820
+SUMMARY:Holiday
+END:VEVENT
+BEGIN:VEVENT
+UID:daily
+DTSTART:20260817T090000
+DTEND:20260817T093000
+RRULE:FREQ=DAILY;COUNT=4
+EXDATE:20260819T090000
+SUMMARY:Daily
+END:VEVENT
+END:VCALENDAR
+"""
+        original = calendar.read_ical_source
+        calendar.read_ical_source = lambda _: text
+        try:
+            events = calendar.ical_events(
+                {"id": "one", "name": "Personal", "source": "file:///unused"},
+                calendar.date(2026, 8, 19))
+        finally:
+            calendar.read_ical_source = original
+        self.assertEqual([event["title"] for event in events], ["Holiday"])
+        self.assertTrue(events[0]["allDay"])
+
+    def test_ical_weekly_byday(self):
+        calendar = load_module()
+        raw = calendar.parse_ical("""BEGIN:VCALENDAR
+BEGIN:VEVENT
+UID:class
+DTSTART:20260817T100000
+DTEND:20260817T110000
+RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=4
+SUMMARY:Class
+END:VEVENT
+END:VCALENDAR
+""")[0]
+        zone = calendar.datetime.now().astimezone().tzinfo
+        starts = calendar.recurrence_starts(
+            raw,
+            calendar.datetime(2026, 8, 19, tzinfo=zone),
+            calendar.datetime(2026, 8, 20, tzinfo=zone))
+        self.assertTrue(any(value.date() == calendar.date(2026, 8, 19) for value in starts))
+
+    def test_feed_add_rejects_insecure_http(self):
+        calendar = load_module()
+        with self.assertRaisesRegex(ValueError, "https"):
+            calendar.add_feed("http://example.com/calendar.ics", "Work")
+
+    def test_feed_preferences_are_stored_with_private_permissions(self):
+        calendar = load_module()
+        with tempfile.TemporaryDirectory() as directory:
+            calendar.STATE = Path(directory)
+            calendar.FEEDS_FILE = calendar.STATE / "feeds.json"
+            calendar.CACHE_DIR = calendar.STATE / "cache"
+            source = Path(directory) / "calendar.ics"
+            source.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+            item = calendar.add_feed(str(source), "Personal")
+            self.assertEqual(calendar.feeds()[0]["name"], "Personal")
+            self.assertEqual(calendar.FEEDS_FILE.stat().st_mode & 0o777, 0o600)
+            calendar.update_feed(item["id"], enabled=False)
+            self.assertFalse(calendar.feeds()[0]["enabled"])
+
     def test_meeting_url_prefers_structured_video(self):
         calendar = load_module()
         event = {

@@ -16,6 +16,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import shlex
 import signal
@@ -27,10 +28,31 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omarchy-meetings"
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+
+
+def launch_processing(recording_dir: str) -> None:
+    """Start processing in its own user service, outside the tick's cgroup.
+
+    A detached Popen is still killed when the systemd oneshot that spawned it
+    exits. A transient service gives transcription an independent lifecycle and
+    preserves its output in the user journal.
+    """
+    stamp = re.sub(r"[^A-Za-z0-9_.-]", "-", Path(recording_dir).name)[:80]
+    command = [sys.argv[0], "process", recording_dir]
+    if shutil.which("systemd-run"):
+        result = subprocess.run(
+            ["systemd-run", "--user", "--collect", "--unit", f"omameet-process-{stamp}",
+             *command], capture_output=True, text=True, timeout=15)
+        if result.returncode == 0:
+            return
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip()
+                           or "could not launch processing service")
+    subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
 
 CONFIG_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
 STATE_DIR = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / APP
@@ -379,7 +401,7 @@ def cmd_doctor(args) -> None:
     check("audio:monitor", sink, f"{sink}.monitor" if sink else "unavailable")
 
     cal = calendar_bin()
-    check("calendar:acp.calendar", cal, cal or "not installed (standalone mode)")
+    check("calendar:omameet", cal, cal or "not installed (standalone mode)")
     if cal:
         # Distinguish "the plugin cannot expose attendees" (a real capability gap
         # that degrades speaker mapping) from "there are simply no events to
@@ -390,17 +412,17 @@ def cmd_doctor(args) -> None:
         supports = supports_attendees(cal)
         if not accounts:
             check("calendar:attendees", supports,
-                  "capable, but no Google account connected yet" if supports
-                  else "acp.calendar cannot expose attendees — speaker mapping degraded")
+                  "capable, but no calendar source connected yet" if supports
+                  else "calendar helper cannot expose attendees — speaker mapping degraded")
         elif not events:
             check("calendar:attendees", supports,
                   "capable; no events today to sample" if supports
-                  else "acp.calendar cannot expose attendees — speaker mapping degraded")
+                  else "calendar helper cannot expose attendees — speaker mapping degraded")
         else:
             present = any("attendees" in ev for ev in events)
             check("calendar:attendees", present,
                   "attendees present in live events" if present
-                  else "acp.calendar does not expose attendees — speaker mapping degraded")
+                  else "calendar source does not expose attendees — speaker mapping degraded")
 
     vault = Path(cfg["vault"]["path"]).expanduser()
     check("vault:writable", os.access(vault.parent, os.W_OK) if vault.parent.exists() else False,
@@ -635,9 +657,7 @@ def cmd_record(args) -> None:
         # A manual stop (including the panel button) is the end of capture, not
         # the end of the workflow.  Process asynchronously so the UI remains
         # responsive while Whisper and the summarizer write into the vault.
-        subprocess.Popen([sys.argv[0], "process", sess["dir"]],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True)
+        launch_processing(sess["dir"])
         emit(sess, args.json,
              f"stopped; processing -> {sess['dir']}")
 
@@ -1089,9 +1109,7 @@ def cmd_tick(args) -> None:
                 A.release(STATE_DIR, stopped.get("event_id", ""))
                 if args.process:
                     actions.append("process")
-                    subprocess.Popen([sys.argv[0], "process", stopped["dir"]],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                     start_new_session=True)
+                    launch_processing(stopped["dir"])
             except SystemExit:
                 actions.append("stop_failed")
         emit({"actions": actions, "state": "idle" if actions else "recording", "woke": woke}, args.json,
@@ -1112,7 +1130,8 @@ def cmd_tick(args) -> None:
         emit({"actions": ["paused"], "state": "paused"}, args.json, "paused")
         return
 
-    # --- trigger 1: calendar ------------------------------------------------
+    # Calendar provides reminders and metadata only. Time on a calendar must
+    # never record someone who did not actually join.
     agenda = calendar_agenda()
     event = None
     if agenda and cfg["detection"].get("calendarPoll", True):
@@ -1121,25 +1140,26 @@ def cmd_tick(args) -> None:
                 actions.append("remind:" + str(reminder.get("id") or "meeting"))
         event = A.due_event(agenda.get("events", []), cfg, qualifies, tick_now)
 
-    if event:
-        if already_recorded(cfg, event.get("id")):
-            emit({"actions": ["already_recorded"], "state": "idle"}, args.json,
-                 "already recorded")
-            return
-        if not A.claim(STATE_DIR, event.get("id", ""), os.uname().nodename):
-            emit({"actions": ["claimed_elsewhere"], "state": "idle"}, args.json,
-                 "another host is recording this meeting")
-            return
-        actions.append("start:calendar" + (":wake_catchup" if woke else ""))
-        sess = start_recording(cfg, event.get("title") or "Meeting", event)
-        emit({"actions": actions, "state": "recording", "dir": sess["dir"], "woke": woke},
-             args.json, f"started (calendar): {sess['title']}")
-        return
-
-    # --- trigger 2: audio activity (a call the calendar never knew about) ---
+    # A live microphone stream owned by a supported meeting app is the sole
+    # automatic start trigger.
     active, app = A.meeting_app_active(cfg)
     if active:
         window = A.active_window_class()          # trigger 3: confirmation only
+        if event and A.event_matches_capture_app(event, app):
+            if already_recorded(cfg, event.get("id")):
+                emit({"actions": ["already_recorded"], "state": "idle"}, args.json,
+                     "already recorded")
+                return
+            if not A.claim(STATE_DIR, event.get("id", ""), os.uname().nodename):
+                emit({"actions": ["claimed_elsewhere"], "state": "idle"}, args.json,
+                     "another host is recording this meeting")
+                return
+            actions.append(f"start:active_call:{app}")
+            sess = start_recording(cfg, event.get("title") or "Meeting", event)
+            emit({"actions": actions, "state": "recording", "dir": sess["dir"],
+                  "app": app, "window": window, "woke": woke}, args.json,
+                 f"started (active {app}): {sess['title']}")
+            return
         if cfg["detection"].get("autoRecordUnplanned", False):
             actions.append(f"start:audio:{app}")
             sess = start_recording(cfg, f"[ad-hoc] call ({app})", None)

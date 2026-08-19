@@ -217,6 +217,23 @@ class HelperTest(unittest.TestCase):
         self.assertIn('sess["capture_client_seen_at"]', source)
         self.assertIn('reason = "app_exit"', source)
 
+    def test_calendar_time_never_starts_recording_by_itself(self):
+        source = HELPER.read_text()
+        tick = source.split("def cmd_tick", 1)[1].split("\n\ndef ", 1)[0]
+        self.assertNotIn("start:calendar", tick)
+        self.assertLess(tick.index("meeting_app_active(cfg)"),
+                        tick.index('start_recording(cfg, event.get("title")'))
+
+    def test_calendar_context_must_match_microphone_app(self):
+        import autopilot
+        meet = {"joinUrl": "https://meet.google.com/abc-defg-hij"}
+        zoom = {"joinUrl": "https://example.zoom.us/j/123"}
+        teams = {"joinUrl": "https://teams.microsoft.com/l/meetup-join/123"}
+        self.assertTrue(autopilot.event_matches_capture_app(meet, "chrome"))
+        self.assertFalse(autopilot.event_matches_capture_app(zoom, "chrome"))
+        self.assertTrue(autopilot.event_matches_capture_app(zoom, "zoom"))
+        self.assertTrue(autopilot.event_matches_capture_app(teams, "teams-for-linux"))
+
     def test_join_reminder_uses_persistent_omarchy_click_action(self):
         source = HELPER.read_text()
         self.assertIn('which("omarchy-notification-send")', source)
@@ -320,8 +337,15 @@ class CliTest(unittest.TestCase):
         source = HELPER.read_text()
         stop_branch = source.split('elif args.action == "stop":', 1)[1].split(
             "\n\ndef ", 1)[0]
-        self.assertIn('"process", sess["dir"]', stop_branch,
+        self.assertIn('launch_processing(sess["dir"])', stop_branch,
                       "manual stop captured audio but never wrote Obsidian notes")
+
+    def test_processing_escapes_tick_systemd_cgroup(self):
+        source = HELPER.read_text()
+        launch = source.split("def launch_processing", 1)[1].split("\n\ndef ", 1)[0]
+        self.assertIn('"systemd-run", "--user"', launch)
+        tick = source.split("def cmd_tick", 1)[1].split("\n\ndef ", 1)[0]
+        self.assertIn('launch_processing(stopped["dir"])', tick)
 
     def test_pause_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
@@ -429,6 +453,30 @@ class ExtractionTest(unittest.TestCase):
 
     def test_parses_bare_json_array(self):
         self.assertEqual(self.e.parse_json_block('noise [{"a":2}] tail'), [{"a": 2}])
+
+    def test_notes_prompt_matches_obsidian_granola_structure(self):
+        self.assertIn("## Notes", self.e.NOTES)
+        self.assertIn("### <descriptive topic heading>", self.e.NOTES)
+        self.assertIn("## Action Items", self.e.NOTES)
+        self.assertIn("## Next Steps", self.e.NOTES)
+
+    def test_notes_fallback_uses_vault_action_item_format(self):
+        original = self.e.call_llm
+        self.e.call_llm = lambda _prompt: (False, "")
+        try:
+            notes = self.e.write_notes(
+                {"title": "Test"}, [], {
+                    "commitments": [{
+                        "text": "Send the report",
+                        "owner": {"name": "Amit"},
+                        "due": {"value": "2026-08-21"},
+                    }],
+                    "decisions": [], "risks": [], "questions": [],
+                }, "transcript")
+        finally:
+            self.e.call_llm = original
+        self.assertTrue(notes.startswith("## Notes"))
+        self.assertIn("- [ ] Amit → Send the report 📅 2026-08-21", notes)
 
 
 class SpeakerResolutionTest(unittest.TestCase):

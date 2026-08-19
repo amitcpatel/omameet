@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "acp.omameet",
   "name": "OmaMeet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Amit Patel",
   "license": "MIT",
-  "description": "Calendar, one-click joining, automatic meeting capture, transcription, summaries, and tasks.",
+  "description": "A private day planner with one-click joining and optional local meeting notes.",
   "kinds": [
     "bar-widget",
     "service"
@@ -26,6 +26,7 @@
       "transcription"
     ],
     "allowMultiple": false,
+    "defaultSection": "right",
     "defaults": {
       "refreshIntervalSec": 300,
       "pollIntervalSec": 15,
