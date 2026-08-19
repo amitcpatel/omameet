@@ -86,8 +86,9 @@ Calendar and joining features need only Python 3.11+. Meeting capture adds:
 
 - `ffmpeg`, `ffprobe`, `pactl`, and `pw-cli`;
 - `whisper-cli` or `whisper-cpp` plus a local model;
-- optionally, one explicitly enabled notes backend: authenticated Codex CLI,
-  Claude CLI, or an OpenAI-compatible `/chat/completions` endpoint.
+- optionally, one explicitly enabled, tool-free notes backend: Claude CLI with
+  all tools disabled, or an OpenAI-compatible `/chat/completions` endpoint
+  called with `tool_choice: none`.
 
 The plugin store intentionally does not run install hooks. To add convenient
 command links, run the repository's safe setup script:
@@ -152,7 +153,6 @@ authenticated CLI as consent to share a transcript. Enable a specific backend
 only after deciding that its data handling is appropriate:
 
 ```bash
-omameet-meetings ai enable codex
 omameet-meetings ai enable claude
 omameet-meetings ai enable endpoint
 omameet-meetings ai status --json
@@ -160,9 +160,11 @@ omameet-meetings ai disable
 ```
 
 Enabling a backend permits OmaMeet to pass meeting transcript text to that
-backend. Codex and Claude may use remote services according to their own
-configuration. For a compatible endpoint, set its environment before enabling
-it:
+backend. OmaMeet invokes Claude with an empty tool set, disables slash commands,
+MCP servers, settings sources, and session persistence. It does not offer a
+Codex CLI backend because `codex exec` has no tool-free mode; a read-only
+sandbox would still permit untrusted transcript text to drive file reads. For a
+compatible endpoint, set its environment before enabling it:
 
 ```bash
 export OMAI_LLM_ENDPOINT="http://127.0.0.1:11434/v1"
@@ -172,7 +174,7 @@ export OMAI_LLM_API_KEY="optional-bearer-token"
 
 With AI disabled, OmaMeet completes local transcription normally and writes a
 local-only `notes.md` marker plus `transcript.md`. No transcript is passed to
-Codex, Claude, or an HTTP endpoint.
+Claude or an HTTP endpoint.
 
 ## Privacy and security
 
@@ -207,5 +209,5 @@ qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Service.qml
 python3 -m unittest discover -s tests -v
 ```
 
-OmaMeet is MIT licensed. Version 0.3.3 requires an OmaMeet-specific opt-in before
+OmaMeet is MIT licensed. Version 0.3.4 requires an OmaMeet-specific opt-in before
 any AI backend can receive transcript text.

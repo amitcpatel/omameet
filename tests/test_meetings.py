@@ -331,9 +331,9 @@ class CliTest(unittest.TestCase):
     def test_ai_opt_in_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             env = {"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d}
-            enabled = self.run_cli("ai", "enable", "codex", "--json", env=env)
+            enabled = self.run_cli("ai", "enable", "claude", "--json", env=env)
             self.assertEqual(enabled.returncode, 0, enabled.stderr)
-            self.assertEqual(json.loads(enabled.stdout)["selected"], "codex")
+            self.assertEqual(json.loads(enabled.stdout)["selected"], "claude")
             status = self.run_cli("ai", "status", "--json", env=env)
             self.assertTrue(json.loads(status.stdout)["enabled"])
             disabled = self.run_cli("ai", "disable", "--json", env=env)
@@ -344,6 +344,12 @@ class CliTest(unittest.TestCase):
     def test_ai_enable_requires_backend(self):
         with tempfile.TemporaryDirectory() as d:
             r = self.run_cli("ai", "enable",
+                             env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
+            self.assertNotEqual(r.returncode, 0)
+
+    def test_agentic_codex_backend_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            r = self.run_cli("ai", "enable", "codex",
                              env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
             self.assertNotEqual(r.returncode, 0)
 
@@ -495,6 +501,36 @@ class ExtractionTest(unittest.TestCase):
         finally:
             self.e.which = original_which
         self.assertIsNone(backend)
+
+    def test_claude_backend_disables_every_tool_and_customization(self):
+        calls = []
+        original_run = self.e.subprocess.run
+        original_which = self.e.which
+        self.e.which = lambda name: "/usr/bin/claude" if name == "claude" else None
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            return subprocess.CompletedProcess(command, 0, "[]", "")
+
+        self.e.subprocess.run = fake_run
+        try:
+            ok, _ = self.e.call_llm("untrusted transcript", "claude")
+        finally:
+            self.e.subprocess.run = original_run
+            self.e.which = original_which
+        self.assertTrue(ok)
+        command = calls[0][0]
+        self.assertIn("--tools", command)
+        self.assertEqual(command[command.index("--tools") + 1], "")
+        self.assertIn("--disable-slash-commands", command)
+        self.assertIn("--strict-mcp-config", command)
+        self.assertIn("--no-session-persistence", command)
+
+    def test_endpoint_forbids_tools(self):
+        source = (QML_DIR / "lib" / "extract.py").read_text()
+        self.assertIn('"tools": []', source)
+        self.assertIn('"tool_choice": "none"', source)
+        self.assertIn("untrusted data", source)
 
     def test_parses_fenced_json(self):
         parsed = self.e.parse_json_block('sure!\n```json\n[{"a":1}]\n```\nthanks')
