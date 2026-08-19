@@ -190,4 +190,5 @@ qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Service.qml
 python3 -m unittest discover -s tests -v
 ```
 
-OmaMeet is MIT licensed. Version 0.3.1 is the plugin-marketplace release.
+OmaMeet is MIT licensed. Version 0.3.2 removes the legacy timer installer and
+watchdog notification; the native Omarchy service is the only automatic detector.

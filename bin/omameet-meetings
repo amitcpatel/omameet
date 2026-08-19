@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omarchy-meetings"
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -1192,163 +1192,6 @@ def already_recorded(cfg: dict, event_id: str | None) -> bool:
     return False
 
 
-def cmd_watchdog(args) -> None:
-    """Fail loud on stale state. Exits non-zero so cron surfaces the problem."""
-    cfg = config()
-    problems = []
-
-    if HEARTBEAT_FILE.exists():
-        try:
-            last = datetime.fromisoformat(HEARTBEAT_FILE.read_text().strip())
-            age = (now() - last).total_seconds()
-            if age > 3600:
-                problems.append({"issue": "stale_heartbeat",
-                                 "detail": f"service has not ticked in {int(age / 60)} min"})
-        except ValueError:
-            problems.append({"issue": "unreadable_heartbeat",
-                             "detail": "corrupt heartbeat file"})
-    else:
-        problems.append({"issue": "no_heartbeat", "detail": "service has never run"})
-
-    sess = session()
-    if sess and sess.get("orphaned"):
-        problems.append({"issue": "orphaned_recording", "detail": sess.get("dir")})
-    if sess and not sess.get("orphaned"):
-        try:
-            started = datetime.fromisoformat(sess["started"])
-            if (now() - started).total_seconds() > 6 * 3600:
-                problems.append({"issue": "recording_stuck",
-                                 "detail": "recording has run for over 6 hours"})
-        except (KeyError, ValueError):
-            pass
-
-    # Unprocessed recordings mean transcripts are silently not being produced.
-    stale = []
-    if RECORDINGS_DIR.exists():
-        for directory in RECORDINGS_DIR.iterdir():
-            if not (directory / "mixed.opus").exists():
-                continue
-            meta = read_json(directory / "session.json") or {}
-            if not meta.get("ended"):
-                continue
-            try:
-                if (now() - datetime.fromisoformat(meta["ended"])).total_seconds() > 7200:
-                    stale.append(str(directory))
-            except ValueError:
-                pass
-    if stale:
-        problems.append({"issue": "unprocessed_recordings",
-                         "detail": f"{len(stale)} recording(s) awaiting processing",
-                         "paths": stale})
-
-    free = free_disk_mb(STATE_DIR)
-    if free < cfg["minFreeDiskMB"]:
-        problems.append({"issue": "low_disk", "detail": f"{free} MB free"})
-
-    payload = {"ok": not problems, "problems": problems, "checked": iso(now())}
-    if args.json:
-        emit(payload, True)
-    else:
-        for problem in problems:
-            print(f"PROBLEM {problem['issue']}: {problem['detail']}")
-        if not problems:
-            print("ok")
-
-    if problems:
-        notify("Meetings: watchdog", "; ".join(p["issue"] for p in problems), urgent=True)
-        sys.exit(1)
-
-
-TICK_SERVICE = """[Unit]
-Description=OmaMeet autopilot tick
-
-[Service]
-Type=oneshot
-ExecStart={exe} tick --process
-"""
-
-TICK_TIMER = """[Unit]
-Description=Run OmaMeet autopilot every 15 seconds
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=15s
-AccuracySec=2s
-
-[Install]
-WantedBy=timers.target
-"""
-
-AUDIT_SERVICE = """[Unit]
-Description=OmaMeet nightly reconciler
-
-[Service]
-Type=oneshot
-ExecStart={exe} audit
-"""
-
-AUDIT_TIMER = """[Unit]
-Description=Nightly meeting audit
-
-[Timer]
-OnCalendar=*-*-* 22:00:00
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-"""
-
-WATCHDOG_SERVICE = """[Unit]
-Description=OmaMeet watchdog
-
-[Service]
-Type=oneshot
-ExecStart={exe} watchdog
-"""
-
-WATCHDOG_TIMER = """[Unit]
-Description=Hourly meetings watchdog
-
-[Timer]
-OnBootSec=10min
-OnUnitActiveSec=1h
-
-[Install]
-WantedBy=timers.target
-"""
-
-
-def cmd_install_timers(args) -> None:
-    """systemd user timers: autopilot tick, nightly audit, hourly watchdog."""
-    unit_dir = Path.home() / ".config/systemd/user"
-    unit_dir.mkdir(parents=True, exist_ok=True)
-    # Always pin units to this plugin's helper. During migration the legacy
-    # omarchy-meetings command may still exist and must not win PATH lookup.
-    exe = str(Path(__file__).resolve())
-
-    units = {
-        "omarchy-meetings-tick.service": TICK_SERVICE.format(exe=exe),
-        "omarchy-meetings-tick.timer": TICK_TIMER,
-        "omarchy-meetings-audit.service": AUDIT_SERVICE.format(exe=exe),
-        "omarchy-meetings-audit.timer": AUDIT_TIMER,
-        "omarchy-meetings-watchdog.service": WATCHDOG_SERVICE.format(exe=exe),
-        "omarchy-meetings-watchdog.timer": WATCHDOG_TIMER,
-    }
-    for name, body in units.items():
-        (unit_dir / name).write_text(body)
-
-    enabled = []
-    if which("systemctl"):
-        run(["systemctl", "--user", "daemon-reload"], timeout=30)
-        for timer in ("omarchy-meetings-tick.timer", "omarchy-meetings-audit.timer",
-                      "omarchy-meetings-watchdog.timer"):
-            code, _, _ = run(["systemctl", "--user", "enable", "--now", timer], timeout=30)
-            if code == 0:
-                enabled.append(timer)
-    emit({"units": sorted(units), "enabled": enabled, "dir": str(unit_dir)}, args.json,
-         f"wrote {len(units)} units to {unit_dir}; enabled {len(enabled)} timers")
-
-
 def cmd_fetch_model(args) -> None:
     """Download a whisper.cpp ggml model into the user's data dir."""
     import urllib.request
@@ -1455,9 +1298,6 @@ def build_parser() -> argparse.ArgumentParser:
     tick.add_argument("--process", action="store_true",
                       help="process the recording after stopping")
     tick.set_defaults(func=cmd_tick)
-
-    add("watchdog", help="fail loud on stale state").set_defaults(func=cmd_watchdog)
-    add("install-timers", help="install systemd user timers").set_defaults(func=cmd_install_timers)
 
     fetch = add("fetch-model", help="download a whisper ggml model")
     fetch.add_argument("model", nargs="?", default="base.en")

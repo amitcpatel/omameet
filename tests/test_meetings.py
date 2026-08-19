@@ -667,13 +667,10 @@ class AutopilotCliTest(unittest.TestCase):
             r = self.run_cli("tick", "--json", env=env)
             self.assertEqual(json.loads(r.stdout)["state"], "paused")
 
-    def test_watchdog_flags_missing_heartbeat(self):
-        with tempfile.TemporaryDirectory() as d:
-            r = self.run_cli("watchdog", "--json",
-                             env={"XDG_STATE_HOME": d, "XDG_CONFIG_HOME": d})
-            self.assertEqual(r.returncode, 1, "watchdog must exit non-zero on problems")
-            issues = {p["issue"] for p in json.loads(r.stdout)["problems"]}
-            self.assertIn("no_heartbeat", issues)
+    def test_legacy_watchdog_and_timer_installer_are_not_exposed(self):
+        help_text = self.run_cli("--help").stdout
+        self.assertNotIn("watchdog", help_text)
+        self.assertNotIn("install-timers", help_text)
 
     def test_commitments_overdue_exits_nonzero_when_found(self):
         """A cron needs a non-zero exit to raise an alert."""
