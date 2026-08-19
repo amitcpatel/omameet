@@ -1,7 +1,8 @@
-# OmaMeet
+# OmaMeet — AI Meeting Notes
 
 OmaMeet puts your day on the Omarchy bar: a fast, private calendar with
-one-click meeting joins and optional local recording, transcription, and notes.
+one-click meeting joins and optional local recording, transcription, and
+AI-generated notes.
 
 It is useful before any meeting automation is configured. Add a private
 iCalendar subscription, see the day at a glance, and join Google Meet, Zoom,
@@ -79,7 +80,7 @@ metadata and per-calendar controls.
 OAuth uses PKCE and a temporary loopback redirect. Refresh tokens live in the
 desktop keyring through `secret-tool`; calendar access is read-only.
 
-## Optional meeting notes
+## Optional AI meeting notes
 
 Calendar and joining features need only Python 3.11+. Meeting capture adds:
 
@@ -111,7 +112,7 @@ Set the output directory in `~/.config/omarchy-meetings/config.json`:
 The destination can be an Obsidian vault, ordinary directory, Dropbox folder,
 Syncthing folder, or Git repository. Each meeting gets its own directory with:
 
-- `notes.md` — notes, decisions, action items, next steps, and risks;
+- `notes.md` — AI-generated notes, decisions, action items, next steps, and risks;
 - `transcript.md` — timestamped transcript;
 - `meeting.json` — structured facts and processing evidence.
 
@@ -189,4 +190,4 @@ qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Service.qml
 python3 -m unittest discover -s tests -v
 ```
 
-OmaMeet is MIT licensed. Version 0.3.0 is the first plugin-marketplace release.
+OmaMeet is MIT licensed. Version 0.3.1 is the plugin-marketplace release.
