@@ -8,8 +8,8 @@ Last updated: 2026-08-19
 - Repository: <https://github.com/amitcpatel/omameet>
 - Marketplace submission: <https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/788>
 - Submission state: open, structurally validated, awaiting requested privacy fix
-- Current public release before this change: `v0.3.2` at `a3c432d`
-- Prepared privacy release: `v0.3.3`
+- Current public release before this change: `v0.3.3` at `825ba22`
+- Prepared security release: `v0.3.4`
 
 Do not open another marketplace submission. Continue with issue #788.
 
@@ -35,21 +35,27 @@ addresses this by:
 
 ## Verification
 
-For v0.3.3:
+The third finding was that transcript prompt injection could drive tools exposed
+by the Codex or Claude agent CLIs. Version 0.3.4 removes the Codex CLI backend
+because it has no tool-free execution mode, invokes Claude with an empty tool
+set and all customization/MCP surfaces disabled, and requires HTTP endpoints to
+honor `tool_choice: none` with no declared tools.
+
+For v0.3.4:
 
 - `omarchy plugin validate .` passes;
-- all 101 unit and contract tests pass;
+- all 104 unit and contract tests pass;
 - Python source compiles;
 - installer and removal scripts pass `bash -n`;
 - `git diff --check` passes.
 
 `qmllint` is not installed on the development machine. No QML files changed in
-v0.3.3.
+v0.3.4.
 
 ## Remaining marketplace review
 
-After v0.3.3 is published, edit and comment on issue #788 to re-run validation.
-Confirm that validation reports v0.3.3 and the new commit. The deterministic
+After v0.3.4 is published, edit and comment on issue #788 to re-run validation.
+Confirm that validation reports v0.3.4 and the new commit. The deterministic
 security baseline may continue to request manual review for the optional setup
 scripts and transient `systemd-run --user` processing job; that flag is expected
 and is not itself a new defect.

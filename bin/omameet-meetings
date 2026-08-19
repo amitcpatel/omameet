@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omarchy-meetings"
-VERSION = "0.3.3"
+VERSION = "0.3.4"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -388,13 +388,6 @@ def cmd_doctor(args) -> None:
     backend, detail = resolve_llm(cfg)
     selected_backend = cfg.get("llm", {}).get("backend", "disabled")
     check("llm:backend", selected_backend == "disabled" or backend is not None, detail)
-    if backend == "codex":
-        code, out, _ = run(["codex", "login", "status"], timeout=30)
-        logged_in = code == 0 and "not logged in" not in out.lower()
-        check("llm:auth", logged_in,
-              out or ("authenticated" if logged_in else "codex present but NOT logged in "
-                      "— run: codex login"))
-
     sink = default_sink()
     source = default_source()
     check("audio:sink", sink, sink or "no default sink")
@@ -758,7 +751,7 @@ def cmd_ai(args) -> None:
     """Require an OmaMeet-specific choice before any transcript reaches AI."""
     cfg = config()
     if args.action == "enable" and not args.backend:
-        fail("choose an AI backend: codex, claude, or endpoint")
+        fail("choose a tool-free AI backend: claude or endpoint")
     if args.action == "status":
         selected = cfg.get("llm", {}).get("backend", "disabled")
         backend, detail = resolve_llm(cfg)
@@ -1270,7 +1263,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ai = add("ai", help="explicitly enable, disable, or inspect AI notes")
     ai.add_argument("action", choices=("enable", "disable", "status"))
-    ai.add_argument("backend", nargs="?", choices=("codex", "claude", "endpoint"))
+    ai.add_argument("backend", nargs="?", choices=("claude", "endpoint"))
     ai.set_defaults(func=cmd_ai)
 
     nxt = add("next", help="today's meetings and whether they'll be recorded")
