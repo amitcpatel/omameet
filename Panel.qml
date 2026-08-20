@@ -461,8 +461,8 @@ Panel {
             anchors.horizontalCenter: parent.horizontalCenter
             label: root.aiChanging ? "Updating AI notes…" : "AI-optimized meeting notes"
             description: root.aiEnabled
-              ? "Uses the default AI agent selected in Omarchy. Agent tools, web search, and subagents are disabled."
-              : "Off — transcription stays local and OmaMeet produces basic notes without AI optimization."
+              ? root.aiDetail + ". Transcript text is sent to that cloud service. Agent tools, web search, and subagents are disabled."
+              : "Off — transcript text stays local. Enable to consent to sending it to Omarchy's selected cloud AI agent."
             checked: root.aiEnabled
             enabled: !root.aiChanging
             foreground: root.foreground

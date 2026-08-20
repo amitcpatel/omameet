@@ -8,11 +8,13 @@ import base64
 import calendar as month_calendar
 import hashlib
 import http.server
+import ipaddress
 import json
 import os
 import re
 import secrets
 import subprocess
+import socket
 import sys
 import urllib.parse
 import urllib.request
@@ -35,6 +37,35 @@ CACHE_DIR = STATE / "agenda-cache"
 CACHE_TTL_SECONDS = 300
 URL_RE = re.compile(r"https://(?:meet\.google\.com|(?:[\w-]+\.)*zoom\.us|teams\.microsoft\.com|(?:[\w-]+\.)*webex\.com)/[^\s<>\"]+", re.I)
 PRIORITIES = ("family", "work", "normal", "informational")
+
+
+def validate_remote_calendar_url(url: str) -> urllib.parse.ParseResult:
+    """Allow public HTTPS calendar endpoints only."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or not parsed.hostname:
+        raise ValueError("calendar subscriptions must use a public https URL")
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(
+            parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
+    except socket.gaierror as exc:
+        raise ValueError("calendar subscription host could not be resolved") from exc
+    for value in addresses:
+        address = ipaddress.ip_address(value)
+        if (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_reserved or address.is_multicast or address.is_unspecified):
+            raise ValueError("calendar subscriptions cannot use private or local hosts")
+    return parsed
+
+
+class SameOriginHttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects that change scheme or origin."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        old = urllib.parse.urlparse(req.full_url)
+        new = validate_remote_calendar_url(newurl)
+        if new.scheme != old.scheme or new.hostname != old.hostname or new.port != old.port:
+            raise ValueError("calendar feed redirect changed origin")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -72,6 +103,8 @@ def add_feed(source: str, name: str | None = None) -> dict:
         raise ValueError("use a local .ics path instead of a file URL")
     elif parsed.scheme == "http":
         raise ValueError("calendar subscriptions must use https")
+    elif parsed.scheme == "https":
+        validate_remote_calendar_url(source)
     feed_id = hashlib.sha256(source.encode()).hexdigest()[:16]
     item = {"id": feed_id, "name": (name or "Calendar").strip() or "Calendar",
             "source": source, "enabled": True, "priority": "normal"}
@@ -97,11 +130,13 @@ def read_ical_source(feed: dict) -> str:
         path = Path(urllib.request.url2pathname(parsed.path))
         data = path.read_bytes()
     else:
+        validate_remote_calendar_url(source)
         request = urllib.request.Request(source, headers={
             "Accept": "text/calendar, text/plain;q=0.9, */*;q=0.1",
             "User-Agent": "OmaMeet/0.3",
         })
-        with urllib.request.urlopen(request, timeout=20) as response:
+        opener = urllib.request.build_opener(SameOriginHttpsRedirectHandler())
+        with opener.open(request, timeout=20) as response:
             data = response.read(10 * 1024 * 1024 + 1)
         if len(data) > 10 * 1024 * 1024:
             raise ValueError("iCalendar feed exceeds 10 MB")

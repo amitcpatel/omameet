@@ -20,6 +20,10 @@ OmaMeet 0.4.0 is the personal-first, opinionated Omarchy meeting assistant:
   resolution.
 - Constrained Grok to one turn with tools denied, web search disabled, and
   subagents disabled.
+- Required explicit persisted consent before any transcript reaches Grok.
+- Moved Grok prompts from argv to private temporary files and removed ephemeral
+  local Grok session state after each call.
+- Rejected private/local calendar feed hosts and cross-origin redirects.
 - Marked transcripts and meeting metadata as untrusted data in every AI pass.
 - Fixed lookalike meeting-domain acceptance and model-name path traversal.
 - Removed stale persistent timer units from the development machine; runtime

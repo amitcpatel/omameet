@@ -53,8 +53,10 @@ The calendar integration requests read-only Calendar access.
 
 ## AI optimization
 
-AI optimization is enabled by default and resolved at processing time, so changing
-Omarchy's default agent changes what OmaMeet uses without another OmaMeet setting.
+AI optimization is disabled until the user explicitly enables it in OmaMeet
+Settings. Enabling persists OmaMeet-specific consent to send transcript text to
+the cloud service used by Omarchy's selected agent. The agent is resolved at
+processing time, so changing Omarchy's default changes what OmaMeet uses.
 
 ```bash
 omarchy-default-agent
@@ -63,7 +65,7 @@ omameet-meetings ai disable
 omameet-meetings ai enable
 ```
 
-When AI optimization is off or unavailable, local transcription still succeeds
+Until that consent is given—and whenever AI is off or unavailable—local transcription still succeeds
 and OmaMeet writes deterministic basic notes. Transcript text is sent to the
 selected AI service only when optimization is enabled. Transcript content is
 treated as untrusted input in every extraction and note-writing pass.

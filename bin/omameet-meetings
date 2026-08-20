@@ -87,7 +87,8 @@ DEFAULT_CONFIG = {
         "appDenylist": [],
     },
     "transcription": {"backend": "local", "model": "large-v3-turbo", "lang": "en"},
-    "llm": {"backend": "omarchy"},
+    # OmaMeet-specific consent: transcripts stay local until the user enables AI.
+    "llm": {"backend": "disabled"},
     "notify": {"desktop": True, "joinReminderMin": 5},
     "audit": {"nightly": True, "alertOnMiss": True},
     "retainAudio": False,

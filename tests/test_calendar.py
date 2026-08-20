@@ -4,6 +4,7 @@ import unittest
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import patch
 
 
 def load_module():
@@ -98,6 +99,25 @@ END:VCALENDAR
         calendar = load_module()
         with self.assertRaisesRegex(ValueError, "local .ics path"):
             calendar.add_feed("file:///etc/passwd", "Unsafe")
+
+    def test_feed_add_rejects_private_and_local_hosts(self):
+        calendar = load_module()
+        for url in ("https://127.0.0.1/calendar.ics",
+                    "https://169.254.169.254/calendar.ics",
+                    "https://10.0.0.5/calendar.ics"):
+            with self.assertRaisesRegex(ValueError, "private or local"):
+                calendar.validate_remote_calendar_url(url)
+
+    def test_feed_redirect_cannot_change_origin(self):
+        calendar = load_module()
+        handler = calendar.SameOriginHttpsRedirectHandler()
+        request = calendar.urllib.request.Request("https://calendar.example/feed.ics")
+        public = [(calendar.socket.AF_INET, calendar.socket.SOCK_STREAM, 6, "",
+                   ("93.184.216.34", 443))]
+        with patch.object(calendar.socket, "getaddrinfo", return_value=public):
+            with self.assertRaisesRegex(ValueError, "changed origin"):
+                handler.redirect_request(
+                    request, None, 302, "Found", {}, "https://attacker.example/feed.ics")
 
     def test_feed_preferences_are_stored_with_private_permissions(self):
         calendar = load_module()

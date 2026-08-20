@@ -8,6 +8,9 @@
 - Changed bar hover text to the next meeting or `No events`.
 - Replaced Claude/endpoint configuration with `omarchy-default-agent` resolution.
 - Added constrained single-turn Grok note optimization.
+- Required persisted OmaMeet-specific consent before sending transcripts to AI.
+- Removed transcripts from Grok argv and cleaned ephemeral local session state.
+- Rejected private calendar-feed hosts and cross-origin redirects.
 - Added explicit prompt-injection boundaries for untrusted meeting content.
 - Hardened meeting-domain matching and Whisper model-name validation.
 - Expanded release, privacy, architecture, and recovery documentation.

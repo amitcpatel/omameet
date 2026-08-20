@@ -8,7 +8,7 @@ minimal file may override only the values that differ.
 {
   "vault": {"path": "~/Projects/Knowledge/Meetings"},
   "retainAudio": false,
-  "llm": {"backend": "omarchy"}
+  "llm": {"backend": "disabled"}
 }
 ```
 
@@ -22,7 +22,7 @@ minimal file may override only the values that differ.
 | `transcription.backend` | `local` | Local transcription path |
 | `transcription.model` | `large-v3-turbo` | Preferred Whisper model name |
 | `transcription.lang` | `en` | Transcription language |
-| `llm.backend` | `omarchy` | Resolve the Omarchy default agent dynamically |
+| `llm.backend` | `disabled` | No cloud transcript processing until explicitly enabled |
 | `notify.desktop` | `true` | Meeting lifecycle notifications |
 | `notify.joinReminderMin` | `5` | Pre-meeting join reminder |
 | `detection.calendarPoll` | `true` | Use calendar events as meeting context |
@@ -57,6 +57,9 @@ Omarchy shell from `manifest.json`; they are separate from the meeting JSON.
 
 Run `omameet-meetings --help` and the relevant subcommand help for the complete
 machine-readable CLI surface.
+
+`ai enable` records OmaMeet-specific consent by setting `llm.backend` to
+`omarchy`. `ai disable` revokes that consent and returns it to `disabled`.
 
 ## Recording policy
 

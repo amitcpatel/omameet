@@ -18,6 +18,8 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
+import urllib.parse
 from datetime import datetime, timedelta
 
 AUTO_THRESHOLD = 0.85
@@ -63,18 +65,34 @@ def call_llm(prompt: str, backend: str = "disabled", timeout: int = 900) -> tupl
     backend, _ = resolve_backend(backend)
     if backend is None:
         return False, "no LLM backend available"
+    if backend != "omarchy:grok":
+        return False, "Omarchy default agent is not supported"
     try:
-        if backend == "omarchy:grok":
-            proc = subprocess.run(
-                ["grok", "--single", prompt, "--permission-mode", "dontAsk",
-                 "--deny", "*", "--no-subagents", "--disable-web-search",
-                 "--max-turns", "1", "--output-format", "plain"],
-                capture_output=True, text=True, timeout=timeout)
-        else:
-            return False, "Omarchy default agent is not supported"
+        with tempfile.TemporaryDirectory(prefix="omameet-grok-") as workdir:
+            prompt_path = os.path.join(workdir, "prompt.txt")
+            descriptor = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                    handle.write(prompt)
+                proc = subprocess.run(
+                    ["grok", "--prompt-file", prompt_path,
+                     "--permission-mode", "dontAsk", "--deny", "*",
+                     "--no-subagents", "--disable-web-search",
+                     "--max-turns", "1", "--output-format", "plain"],
+                    cwd=workdir, capture_output=True, text=True, timeout=timeout)
+            finally:
+                try:
+                    os.unlink(prompt_path)
+                except FileNotFoundError:
+                    pass
+                # Grok persists headless sessions by cwd. The cwd is unique to
+                # this call, so its exact session bucket can be removed safely.
+                session_key = urllib.parse.quote(workdir, safe="")
+                shutil.rmtree(os.path.expanduser(f"~/.grok/sessions/{session_key}"),
+                              ignore_errors=True)
     except subprocess.TimeoutExpired:
         return False, "llm timed out"
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, OSError) as exc:
         return False, str(exc)
     if proc.returncode != 0:
         return False, f"llm exited {proc.returncode}: {proc.stderr[-300:]}"

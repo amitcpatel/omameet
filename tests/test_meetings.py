@@ -7,7 +7,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
+import urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -145,7 +147,9 @@ class ThemeComplianceTest(unittest.TestCase):
         self.assertIn('command: [root.meetingsHelper, "ai", "status", "--json"]', source)
         self.assertIn('command: [root.meetingsHelper, "ai", "enable", "--json"]', source)
         self.assertIn('command: [root.meetingsHelper, "ai", "disable", "--json"]', source)
-        self.assertIn("default AI agent selected in Omarchy", source)
+        self.assertIn("Transcript text is sent to that cloud service", source)
+        self.assertIn("Enable to consent", source)
+        self.assertIn("root.aiDetail", source)
         self.assertNotIn("iCalendar subscription", source)
         self.assertNotIn("Right-click for settings", source)
         self.assertIn('return "No events"', source)
@@ -297,8 +301,8 @@ class HelperTest(unittest.TestCase):
     def test_transcription_defaults_local(self):
         self.assertEqual(self.mod.DEFAULT_CONFIG["transcription"]["backend"], "local")
 
-    def test_ai_notes_follow_omarchy_default(self):
-        self.assertEqual(self.mod.DEFAULT_CONFIG["llm"]["backend"], "omarchy")
+    def test_ai_notes_require_omameet_specific_consent(self):
+        self.assertEqual(self.mod.DEFAULT_CONFIG["llm"]["backend"], "disabled")
 
     def test_processing_lock_is_exclusive(self):
         """Two processors must never race and overwrite audio audit evidence."""
@@ -386,17 +390,75 @@ class CliTest(unittest.TestCase):
             r = self.run_cli("config", env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertFalse(json.loads(r.stdout)["retainAudio"])
-            self.assertEqual(json.loads(r.stdout)["llm"]["backend"], "omarchy")
+            self.assertEqual(json.loads(r.stdout)["llm"]["backend"], "disabled")
 
-    def test_ai_disable_roundtrip(self):
+    def test_ai_enable_persists_explicit_consent(self):
+        mod = load_helper()
         with tempfile.TemporaryDirectory() as d:
-            env = {"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d}
-            status = self.run_cli("ai", "status", "--json", env=env)
-            self.assertTrue(json.loads(status.stdout)["enabled"])
-            disabled = self.run_cli("ai", "disable", "--json", env=env)
-            self.assertEqual(disabled.returncode, 0, disabled.stderr)
-            status = self.run_cli("ai", "status", "--json", env=env)
-            self.assertFalse(json.loads(status.stdout)["enabled"])
+            original_file = mod.CONFIG_FILE
+            original_dir = mod.CONFIG_DIR
+            original_resolve = mod.resolve_llm
+            mod.CONFIG_DIR = Path(d)
+            mod.CONFIG_FILE = Path(d) / "config.json"
+            mod.resolve_llm = lambda _cfg=None: ("omarchy:grok", "Omarchy default agent: Grok")
+            try:
+                mod.cmd_ai(types.SimpleNamespace(action="enable", json=True))
+                saved = json.loads(mod.CONFIG_FILE.read_text())
+            finally:
+                mod.CONFIG_FILE = original_file
+                mod.CONFIG_DIR = original_dir
+                mod.resolve_llm = original_resolve
+            self.assertEqual(saved["llm"]["backend"], "omarchy")
+
+    def test_process_uses_local_notes_until_consent_is_enabled(self):
+        mod = load_helper()
+        seen = []
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            recording = root / "recording"
+            recording.mkdir()
+            (recording / "mixed.opus").write_bytes(b"audio")
+            (recording / "session.json").write_text(json.dumps({
+                "title": "Consent test", "started": "2026-08-19T10:00:00-04:00"
+            }))
+            transcribe = types.SimpleNamespace(
+                transcribe=lambda *_args: {"ok": True, "segments": [], "model": "test"},
+                diarize=lambda *_args: ([], "test"),
+                resolve_speakers=lambda *_args: ([], []),
+                render_transcript=lambda *_args: "marker transcript")
+
+            def extract_local(_text, _participants, _meeting, backend):
+                seen.append(("extract", backend))
+                return {"commitments": [], "decisions": [], "uncertain": [],
+                        "llm": {"backend": None}, "passes": {"note": "local"}}
+
+            def notes_local(_meeting, _participants, _extracted, _text, backend):
+                seen.append(("notes", backend))
+                return "## Notes\n\n_Local processing._\n"
+
+            extract = types.SimpleNamespace(extract=extract_local, write_notes=notes_local)
+            vault = types.SimpleNamespace(write_meeting=lambda *_args: {
+                "ok": True, "dir": str(root / "vault"), "audio_deleted": True,
+                "audio_retained": False, "extraction_ok": True})
+            originals = {name: sys.modules.get(name) for name in ("transcribe", "extract", "vault")}
+            original_config, original_silent, original_notify = mod.config, mod.is_silent, mod.notify
+            original_lock = mod.acquire_process_lock
+            sys.modules.update({"transcribe": transcribe, "extract": extract, "vault": vault})
+            mod.config = lambda: mod.deep_merge(mod.DEFAULT_CONFIG, {"vault": {"path": str(root / "vault")}})
+            mod.is_silent = lambda _path: False
+            mod.notify = lambda *_args, **_kwargs: None
+            mod.acquire_process_lock = lambda _path: types.SimpleNamespace(close=lambda: None)
+            try:
+                mod.cmd_process(types.SimpleNamespace(path=str(recording), json=True))
+            finally:
+                mod.config, mod.is_silent, mod.notify = original_config, original_silent, original_notify
+                mod.acquire_process_lock = original_lock
+                for name, value in originals.items():
+                    if value is None:
+                        sys.modules.pop(name, None)
+                    else:
+                        sys.modules[name] = value
+        self.assertEqual(seen, [("extract", "disabled"), ("notes", "disabled")])
 
     def test_ai_rejects_backend_argument(self):
         with tempfile.TemporaryDirectory() as d:
@@ -557,20 +619,38 @@ class ExtractionTest(unittest.TestCase):
         calls = []
         original_run = self.e.subprocess.run
         original_which = self.e.which
+        original_home = os.environ.get("HOME")
         self.e.which = lambda name: "/usr/bin/grok" if name == "grok" else None
 
         def fake_run(command, **kwargs):
             calls.append((command, kwargs))
+            prompt_path = Path(command[command.index("--prompt-file") + 1])
+            self.assertEqual(prompt_path.read_text(), "marker transcript: do not persist")
+            self.assertEqual(prompt_path.stat().st_mode & 0o777, 0o600)
+            session_key = urllib.parse.quote(kwargs["cwd"], safe="")
+            session = Path(os.environ["HOME"]) / ".grok/sessions" / session_key / "session-id"
+            session.mkdir(parents=True)
+            (session / "chat_history.jsonl").write_text("marker transcript: do not persist")
             return subprocess.CompletedProcess(command, 0, "[]", "")
 
-        self.e.subprocess.run = fake_run
-        try:
-            ok, _ = self.e.call_llm("untrusted transcript", "omarchy:grok")
-        finally:
-            self.e.subprocess.run = original_run
-            self.e.which = original_which
+        with tempfile.TemporaryDirectory() as home:
+            os.environ["HOME"] = home
+            self.e.subprocess.run = fake_run
+            try:
+                ok, _ = self.e.call_llm("marker transcript: do not persist", "omarchy:grok")
+            finally:
+                self.e.subprocess.run = original_run
+                self.e.which = original_which
+                if original_home is None:
+                    os.environ.pop("HOME", None)
+                else:
+                    os.environ["HOME"] = original_home
+            self.assertEqual(list((Path(home) / ".grok/sessions").glob("**/*")), [])
         self.assertTrue(ok)
         command = calls[0][0]
+        self.assertNotIn("marker transcript: do not persist", command)
+        self.assertNotIn("--single", command)
+        self.assertIn("--prompt-file", command)
         self.assertIn("--deny", command)
         self.assertEqual(command[command.index("--deny") + 1], "*")
         self.assertIn("--no-subagents", command)

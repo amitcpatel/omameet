@@ -26,10 +26,13 @@ the UI does not depend on an installation hook or the user's `PATH`.
 
 ## AI resolution
 
-The configured backend is `omarchy`, not a hard-coded model. At processing time
-OmaMeet runs `omarchy-default-agent`. Version 0.4.0 supports Grok and deliberately
+The default backend is `disabled`. Enabling AI in OmaMeet Settings persists the
+user's OmaMeet-specific consent by selecting `omarchy`, not a hard-coded model.
+At processing time OmaMeet runs `omarchy-default-agent`. Version 0.4.0 supports Grok and deliberately
 fails closed for unsupported agents. Grok is invoked for a single turn with
 tools denied, web search disabled, subagents disabled, and no model override.
+The prompt travels in a private temporary file, never in argv. The call uses an
+ephemeral working directory whose local Grok session bucket is deleted afterward.
 
 ## Runtime ownership
 
