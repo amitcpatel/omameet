@@ -1,4 +1,4 @@
-# OmaMeet 0.4.0 review record
+# OmaMeet 0.4.1 review record
 
 This file carries forward the independent pre-submission review performed
 against 0.3.5 and records how its findings were handled in 0.4.0.
@@ -14,6 +14,7 @@ against 0.3.5 and records how its findings were handled in 0.4.0.
 | Local Grok session retained transcript | Resolved: every call uses a unique temporary cwd and removes its exact local Grok session bucket afterward; marker regression testing verifies cleanup. |
 | Private feed hosts and unsafe redirects | Resolved: remote feeds reject private, loopback, link-local, reserved, multicast, and unspecified addresses; redirects cannot change HTTPS origin. |
 | AI disclosure omitted resolved agent/cloud transfer | Resolved: the enabled Panel description includes the resolved agent detail and states that transcript text is sent to its cloud service. |
+| Mutable unverified Whisper model download | Resolved in 0.4.1: downloads are allowlisted, pinned to immutable upstream revision `5359861c739e955e79d9a303bcbc70fb988958b1`, and SHA-256 verified before cached or downloaded bytes are accepted. |
 | Agent tools could process untrusted transcript instructions | Preserved: Grok remains constrained to one turn with tools denied, web search disabled, and subagents disabled. Every AI prompt labels meeting content as untrusted data. |
 
 ## Preserved safeguards

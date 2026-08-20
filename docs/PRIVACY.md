@@ -58,6 +58,13 @@ anchored Google Meet, Zoom, Microsoft Teams, and Webex hosts; lookalike domains
 are rejected. External links are passed to `xdg-open` as argument arrays, not
 through a shell command.
 
+## Model supply chain
+
+`fetch-model` accepts only `base.en` and `large-v3-turbo`, downloads from the
+immutable whisper.cpp model revision recorded in the source, and verifies the
+artifact's published SHA-256 before moving it into the model directory. Existing
+cached models must also match the allowlisted digest before they are accepted.
+
 ## Deletion and uninstall
 
 `uninstall.sh` removes only command links that point into this plugin. Plugin

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -29,7 +30,21 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omarchy-meetings"
-VERSION = "0.4.0"
+VERSION = "0.4.1"
+
+WHISPER_MODEL_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
+WHISPER_MODEL_ARTIFACTS = {
+    "base.en": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
+    "large-v3-turbo": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
+}
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -1220,29 +1235,39 @@ def already_recorded(cfg: dict, event_id: str | None) -> bool:
 
 
 def cmd_fetch_model(args) -> None:
-    """Download a whisper.cpp ggml model into the user's data dir."""
+    """Download and verify an allowlisted, immutable whisper.cpp model."""
     import urllib.request
     name = args.model
     if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
         fail("invalid model name", notify_user=False)
+    expected_sha256 = WHISPER_MODEL_ARTIFACTS.get(name)
+    if expected_sha256 is None:
+        fail("unsupported model; choose base.en or large-v3-turbo", notify_user=False)
     dest_dir = Path.home() / ".local/share/whisper.cpp/models"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"ggml-{name}.bin"
     if dest.exists():
-        emit({"ok": True, "path": str(dest), "cached": True}, args.json,
-             f"already present: {dest}")
-        return
-    url = ("https://huggingface.co/ggerganov/whisper.cpp/resolve/main/"
-           f"ggml-{name}.bin")
+        actual = file_sha256(dest)
+        if actual == expected_sha256:
+            emit({"ok": True, "path": str(dest), "cached": True,
+                  "sha256": actual}, args.json, f"verified existing model: {dest}")
+            return
+        fail(f"existing model failed SHA-256 verification: {dest}")
+    url = ("https://huggingface.co/ggerganov/whisper.cpp/resolve/"
+           f"{WHISPER_MODEL_REVISION}/ggml-{name}.bin")
     tmp = dest.with_suffix(".part")
     try:
         print(f"downloading {name} ...", file=sys.stderr)
         urllib.request.urlretrieve(url, tmp)
+        actual = file_sha256(tmp)
+        if actual != expected_sha256:
+            raise ValueError("downloaded model failed SHA-256 verification")
         tmp.replace(dest)
     except Exception as exc:
         tmp.unlink(missing_ok=True)
         fail(f"model download failed: {exc}")
-    emit({"ok": True, "path": str(dest), "bytes": dest.stat().st_size}, args.json,
+    emit({"ok": True, "path": str(dest), "bytes": dest.stat().st_size,
+          "sha256": expected_sha256}, args.json,
          f"downloaded {dest}")
 
 

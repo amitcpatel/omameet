@@ -10,6 +10,8 @@ import tempfile
 import types
 import unittest
 import urllib.parse
+import urllib.request
+from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -366,12 +368,49 @@ class CliTest(unittest.TestCase):
         r = self.run_cli("version", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["name"], "omarchy-meetings")
-        self.assertEqual(json.loads(r.stdout)["version"], "0.4.0")
+        self.assertEqual(json.loads(r.stdout)["version"], "0.4.1")
 
     def test_fetch_model_rejects_path_traversal(self):
         r = self.run_cli("fetch-model", "../evil", "--json")
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("invalid model name", r.stderr)
+
+    def test_fetch_model_uses_pinned_revision_and_verifies_sha256(self):
+        mod = load_helper()
+        payload = b"verified whisper model"
+        digest = __import__("hashlib").sha256(payload).hexdigest()
+        urls = []
+        with tempfile.TemporaryDirectory() as directory:
+            def download(url, destination):
+                urls.append(url)
+                Path(destination).write_bytes(payload)
+
+            with patch.object(mod.Path, "home", return_value=Path(directory)), \
+                    patch.object(mod, "WHISPER_MODEL_ARTIFACTS", {"test": digest}), \
+                    patch.object(urllib.request, "urlretrieve", side_effect=download):
+                mod.cmd_fetch_model(types.SimpleNamespace(model="test", json=True))
+            output = Path(directory) / ".local/share/whisper.cpp/models/ggml-test.bin"
+            self.assertEqual(output.read_bytes(), payload)
+        self.assertEqual(len(urls), 1)
+        self.assertIn(f"/resolve/{mod.WHISPER_MODEL_REVISION}/", urls[0])
+        self.assertNotIn("/resolve/main/", urls[0])
+
+    def test_fetch_model_rejects_and_removes_tampered_download(self):
+        mod = load_helper()
+        expected = __import__("hashlib").sha256(b"expected").hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            def download(_url, destination):
+                Path(destination).write_bytes(b"tampered")
+
+            with patch.object(mod.Path, "home", return_value=Path(directory)), \
+                    patch.object(mod, "WHISPER_MODEL_ARTIFACTS", {"test": expected}), \
+                    patch.object(urllib.request, "urlretrieve", side_effect=download), \
+                    patch.object(mod, "fail", side_effect=RuntimeError("rejected")):
+                with self.assertRaisesRegex(RuntimeError, "rejected"):
+                    mod.cmd_fetch_model(types.SimpleNamespace(model="test", json=True))
+            model_dir = Path(directory) / ".local/share/whisper.cpp/models"
+            self.assertFalse((model_dir / "ggml-test.bin").exists())
+            self.assertFalse((model_dir / "ggml-test.part").exists())
 
     def test_invalid_model_name_does_not_raise_desktop_notification(self):
         source = HELPER.read_text()

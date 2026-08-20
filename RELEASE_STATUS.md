@@ -1,8 +1,8 @@
-# OmaMeet 0.4.0 release status
+# OmaMeet 0.4.1 release status
 
 ## Product direction
 
-OmaMeet 0.4.0 is the personal-first, opinionated Omarchy meeting assistant:
+OmaMeet 0.4.1 is the personal-first, opinionated Omarchy meeting assistant:
 
 - Google Calendar through the user's GCP OAuth project.
 - Scheduled and ad-hoc recording from the shell panel.
@@ -24,6 +24,8 @@ OmaMeet 0.4.0 is the personal-first, opinionated Omarchy meeting assistant:
 - Moved Grok prompts from argv to private temporary files and removed ephemeral
   local Grok session state after each call.
 - Rejected private/local calendar feed hosts and cross-origin redirects.
+- Pinned the two supported Whisper model artifacts to an immutable upstream
+  revision and verify their published SHA-256 values before use.
 - Marked transcripts and meeting metadata as untrusted data in every AI pass.
 - Fixed lookalike meeting-domain acceptance and model-name path traversal.
 - Removed stale persistent timer units from the development machine; runtime
@@ -41,5 +43,6 @@ omarchy plugin validate .
 git diff --check
 ```
 
-The 0.4.0 commit may be pushed for review, but marketplace resubmission and a
-`v0.4.0` tag should wait for an independent review of the exact pushed commit.
+Marketplace resubmission and a `v0.4.1` tag must reference the same validated
+commit. Version 0.4.0 was tagged before the final model-integrity finding and is
+not the marketplace submission candidate.

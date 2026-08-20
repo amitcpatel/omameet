@@ -52,7 +52,7 @@ Omarchy shell from `manifest.json`; they are separate from the meeting JSON.
 | `pause` / `resume` | Pause or resume automatic detection |
 | `next` | Show upcoming meeting decisions |
 | `commitments` | Query extracted commitments |
-| `fetch-model NAME` | Download a supported whisper.cpp model file |
+| `fetch-model NAME` | Download and SHA-256 verify `base.en` or `large-v3-turbo` from a pinned revision |
 | `version --json` | Print the installed OmaMeet version |
 
 Run `omameet-meetings --help` and the relevant subcommand help for the complete

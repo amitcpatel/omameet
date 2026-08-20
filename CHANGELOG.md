@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1 — verified model artifacts
+
+- Pinned Whisper model downloads to immutable upstream revision
+  `5359861c739e955e79d9a303bcbc70fb988958b1`.
+- Restricted downloads to `base.en` and `large-v3-turbo`.
+- Verify published SHA-256 values before accepting cached or downloaded models.
+
 ## 0.4.0 — personal-first rebuild
 
 - Made Google Calendar through the user's GCP OAuth project the primary path.
