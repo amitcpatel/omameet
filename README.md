@@ -38,6 +38,8 @@ Omarchy intentionally does not run plugin install hooks. The shell UI and its
 bundled helpers work immediately because QML resolves them inside the plugin
 directory. To also install the optional `omameet-calendar` and
 `omameet-meetings` command links, run `./install.sh` from the cloned plugin.
+The installer refuses to replace an existing regular file or command link
+owned by another checkout; resolve that conflict explicitly before retrying.
 
 ## Google Calendar setup
 
@@ -106,7 +108,7 @@ If the optional CLI links were not installed, run the helper from the plugin:
 
 ## Development status
 
-Version 0.4.1 is the reviewed personal-first release. It restores ad-hoc recording,
+Version 0.4.2 is the reviewed personal-first release. It restores ad-hoc recording,
 follows Omarchy's default AI agent, and makes Google Calendar the opinionated
 primary calendar experience. Whisper model downloads are pinned to an immutable
 upstream revision and accepted only after SHA-256 verification.

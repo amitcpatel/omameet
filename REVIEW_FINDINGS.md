@@ -1,7 +1,7 @@
-# OmaMeet 0.4.1 review record
+# OmaMeet 0.4.2 review record
 
 This file carries forward the independent pre-submission review performed
-against 0.3.5 and records how its findings were handled in 0.4.0.
+against 0.3.5 and records how its findings were handled through 0.4.2.
 
 | Finding | 0.4.0 disposition |
 |---|---|
@@ -15,6 +15,7 @@ against 0.3.5 and records how its findings were handled in 0.4.0.
 | Private feed hosts and unsafe redirects | Resolved: remote feeds reject private, loopback, link-local, reserved, multicast, and unspecified addresses; redirects cannot change HTTPS origin. |
 | AI disclosure omitted resolved agent/cloud transfer | Resolved: the enabled Panel description includes the resolved agent detail and states that transcript text is sent to its cloud service. |
 | Mutable unverified Whisper model download | Resolved in 0.4.1: downloads are allowlisted, pinned to immutable upstream revision `5359861c739e955e79d9a303bcbc70fb988958b1`, and SHA-256 verified before cached or downloaded bytes are accepted. |
+| Optional installer overwrote existing command paths | Resolved in 0.4.2: both destinations are preflighted before mutation; regular files and foreign symlinks fail closed, while links already owned by the same checkout are preserved. |
 | Agent tools could process untrusted transcript instructions | Preserved: Grok remains constrained to one turn with tools denied, web search disabled, and subagents disabled. Every AI prompt labels meeting content as untrusted data. |
 
 ## Preserved safeguards
@@ -28,6 +29,5 @@ against 0.3.5 and records how its findings were handled in 0.4.0.
 
 ## Remaining review gate
 
-All listed fixes are implemented locally and require an independent review of
-the final commit. Do not create `v0.4.0` or re-trigger the marketplace until that
-exact commit passes review.
+All listed fixes are implemented in the 0.4.2 release candidate and require an
+independent review of the final commit before the marketplace issue is updated.

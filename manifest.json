@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "acp.omameet",
   "name": "OmaMeet — AI Meeting Notes",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "author": "Amit Patel",
   "license": "MIT",
   "description": "An opinionated Google Calendar day planner with local transcription and AI-optimized meeting notes.",

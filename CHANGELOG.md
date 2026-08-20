@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.2 — non-destructive optional installer
+
+- Refuse to overwrite regular files or foreign symlinks at either optional command-link destination.
+- Preflight both command destinations before creating either link, preventing partial installation on conflict.
+- Preserve and accept command links that already resolve to the same OmaMeet checkout.
+- Add behavioral installer and uninstaller regression coverage with an isolated `HOME`.
+
 ## 0.4.1 — verified model artifacts
 
 - Pinned Whisper model downloads to immutable upstream revision
