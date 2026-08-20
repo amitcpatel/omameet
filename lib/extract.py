@@ -57,7 +57,7 @@ def resolve_backend(selected: str = "disabled") -> tuple[str | None, str]:
             return "omarchy:grok", "Omarchy default agent: Grok"
         if not current:
             return None, "No default AI agent is selected in Omarchy"
-        return None, f"Omarchy default agent '{current}' is not supported by OmaMeet yet"
+        return None, f"Omarchy default agent '{current}' is not supported by OmaScribe yet"
     return None, f"unsupported AI backend: {selected}"
 
 
@@ -68,7 +68,7 @@ def call_llm(prompt: str, backend: str = "disabled", timeout: int = 900) -> tupl
     if backend != "omarchy:grok":
         return False, "Omarchy default agent is not supported"
     try:
-        with tempfile.TemporaryDirectory(prefix="omameet-grok-") as workdir:
+        with tempfile.TemporaryDirectory(prefix="omascribe-grok-") as workdir:
             prompt_path = os.path.join(workdir, "prompt.txt")
             descriptor = os.open(prompt_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
             try:

@@ -1,7 +1,7 @@
 # Configuration and command reference
 
 Meeting configuration is JSON at
-`~/.config/omarchy-meetings/config.json`. Missing keys inherit defaults, so a
+`~/.config/omascribe/config.json`. Missing keys inherit defaults, so a
 minimal file may override only the values that differ.
 
 ```json
@@ -53,12 +53,12 @@ Omarchy shell from `manifest.json`; they are separate from the meeting JSON.
 | `next` | Show upcoming meeting decisions |
 | `commitments` | Query extracted commitments |
 | `fetch-model NAME` | Download and SHA-256 verify `base.en` or `large-v3-turbo` from a pinned revision |
-| `version --json` | Print the installed OmaMeet version |
+| `version --json` | Print the installed OmaScribe version |
 
-Run `omameet-meetings --help` and the relevant subcommand help for the complete
+Run `omascribe-meetings --help` and the relevant subcommand help for the complete
 machine-readable CLI surface.
 
-`ai enable` records OmaMeet-specific consent by setting `llm.backend` to
+`ai enable` records OmaScribe-specific consent by setting `llm.backend` to
 `omarchy`. `ai disable` revokes that consent and returns it to `disabled`.
 
 ## Recording policy

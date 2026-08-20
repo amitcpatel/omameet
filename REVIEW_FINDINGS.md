@@ -1,15 +1,15 @@
-# OmaMeet 0.4.2 review record
+# OmaScribe 0.5.0 review record
 
 This file carries forward the independent pre-submission review performed
 against 0.3.5 and records how its findings were handled through 0.4.2.
 
-| Finding | 0.4.0 disposition |
+| Finding | Current disposition |
 |---|---|
 | Working tree differed from the tagged release | Resolved by versioning and committing the complete product reset as 0.4.0. |
 | Lookalike Zoom/Webex domains accepted | Resolved with anchored host matching and regression tests. |
 | Direct `file://` calendar sources accepted | Resolved; users must provide an explicit local `.ics` path. |
 | Whisper model-name path traversal | Resolved with a strict model-name allowlist and regression test. |
-| First-run AI consent | Resolved: AI defaults to disabled; enabling it persists OmaMeet-specific consent. Disabled processing performs local transcription and deterministic notes without invoking Grok. |
+| First-run AI consent | Resolved: AI defaults to disabled; enabling it persists OmaScribe-specific consent. Disabled processing performs local transcription and deterministic notes without invoking Grok. |
 | Transcript exposed in process argv | Resolved: Grok receives a mode-`0600` `--prompt-file`; marker regression testing verifies transcript text is absent from argv. |
 | Local Grok session retained transcript | Resolved: every call uses a unique temporary cwd and removes its exact local Grok session bucket afterward; marker regression testing verifies cleanup. |
 | Private feed hosts and unsafe redirects | Resolved: remote feeds reject private, loopback, link-local, reserved, multicast, and unspecified addresses; redirects cannot change HTTPS origin. |
@@ -27,7 +27,9 @@ against 0.3.5 and records how its findings were handled through 0.4.2.
 - OAuth tokens remain in the system keyring and configuration/state files use
   private directories or explicit `0600` permissions where sensitive.
 
-## Remaining review gate
+## 0.5.0 rename review gate
 
-All listed fixes are implemented in the 0.4.2 release candidate and require an
-independent review of the final commit before the marketplace issue is updated.
+All listed safeguards remain implemented. Version 0.5.0 changes the product
+identity, executable names, and local namespaces, and adds non-destructive
+migration coverage. The exact tagged commit must pass marketplace validation and
+manual review before listing.

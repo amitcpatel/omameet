@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 
 def load_module():
-    path = Path(__file__).parents[1] / "bin" / "omameet-calendar"
+    path = Path(__file__).parents[1] / "bin" / "omascribe-calendar"
     loader = importlib.machinery.SourceFileLoader("omarchy_calendar", str(path))
     spec = importlib.util.spec_from_loader(loader.name, loader)
     module = importlib.util.module_from_spec(spec)
@@ -17,6 +17,25 @@ def load_module():
 
 
 class CalendarTests(unittest.TestCase):
+    def test_legacy_keyring_token_is_migrated_to_omascribe_namespace(self):
+        calendar = load_module()
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append((argv, kwargs.get("input")))
+            if argv[1] == "lookup" and "omarchy-calendar" in argv:
+                return type("Result", (), {"returncode": 0, "stdout": "legacy-token\n"})()
+            if argv[1] == "lookup":
+                return type("Result", (), {"returncode": 1, "stdout": ""})()
+            return type("Result", (), {"returncode": 0, "stdout": ""})()
+
+        with patch.object(calendar.subprocess, "run", side_effect=fake_run):
+            self.assertEqual("legacy-token", calendar.load_token("account-1"))
+
+        self.assertIn("omascribe-calendar", calls[0][0])
+        self.assertIn("omarchy-calendar", calls[1][0])
+        self.assertEqual("legacy-token", calls[2][1])
+
     def test_ical_parses_folded_text_and_meeting_link(self):
         calendar = load_module()
         feed = {"id": "work", "name": "Work", "source": "file:///unused"}

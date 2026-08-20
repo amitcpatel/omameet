@@ -14,9 +14,9 @@ keyring rather than embedded in plugin configuration.
 
 ## When transcript text may leave the machine
 
-AI optimization is disabled by default in 0.4.0. Transcript text does not reach
-Grok until the user explicitly enables AI in OmaMeet Settings. That action
-persists OmaMeet-specific consent. When enabled and Omarchy's default agent
+AI optimization is disabled by default. Transcript text does not reach
+Grok until the user explicitly enables AI in OmaScribe Settings. That action
+persists OmaScribe-specific consent. When enabled and Omarchy's default agent
 resolves to Grok, meeting transcript text and structured meeting context are sent
 through the installed Grok CLI. Remote handling is governed by the user's
 Grok/xAI account and terms.
@@ -24,14 +24,14 @@ Grok/xAI account and terms.
 Disable remote optimization at any time:
 
 ```bash
-omameet-meetings ai disable
+omascribe-meetings ai disable
 ```
 
 Transcription continues locally and deterministic basic notes are still written.
 
 ## Agent restrictions
 
-OmaMeet invokes Grok with:
+OmaScribe invokes Grok with:
 
 - one turn;
 - non-interactive permission mode;
@@ -41,7 +41,7 @@ OmaMeet invokes Grok with:
 - no explicit model override.
 
 Prompts are passed through a mode-`0600` temporary file instead of process
-arguments. Each call runs in a unique temporary working directory; OmaMeet
+arguments. Each call runs in a unique temporary working directory; OmaScribe
 deletes that directory and its corresponding local Grok session bucket after
 the process exits. This prevents local Grok conversation history from retaining
 the transcript, but does not make claims about the cloud service's retention.

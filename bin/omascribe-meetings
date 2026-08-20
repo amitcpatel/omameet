@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""omarchy-meetings — agent-first meeting intelligence for Omarchy.
+"""omascribe-meetings — agent-first meeting intelligence for Omarchy.
 
 Python 3 standard library only. The CLI is the agent API: every read command
 supports --json.
@@ -29,8 +29,8 @@ import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-APP = "omarchy-meetings"
-VERSION = "0.4.1"
+APP = "omascribe"
+VERSION = "0.5.0"
 
 WHISPER_MODEL_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
 WHISPER_MODEL_ARTIFACTS = {
@@ -61,7 +61,7 @@ def launch_processing(recording_dir: str) -> None:
     command = [sys.argv[0], "process", recording_dir]
     if shutil.which("systemd-run"):
         result = subprocess.run(
-            ["systemd-run", "--user", "--collect", "--unit", f"omameet-process-{stamp}",
+            ["systemd-run", "--user", "--collect", "--unit", f"omascribe-process-{stamp}",
              *command], capture_output=True, text=True, timeout=15)
         if result.returncode == 0:
             return
@@ -102,7 +102,7 @@ DEFAULT_CONFIG = {
         "appDenylist": [],
     },
     "transcription": {"backend": "local", "model": "large-v3-turbo", "lang": "en"},
-    # OmaMeet-specific consent: transcripts stay local until the user enables AI.
+    # OmaScribe-specific consent: transcripts stay local until the user enables AI.
     "llm": {"backend": "disabled"},
     "notify": {"desktop": True, "joinReminderMin": 5},
     "audit": {"nightly": True, "alertOnMiss": True},
@@ -179,7 +179,7 @@ def run(cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
 def notify(title: str, body: str, urgent: bool = False) -> None:
     if not config()["notify"]["desktop"] or not which("notify-send"):
         return
-    args = ["notify-send", "-a", "OmaMeet"]
+    args = ["notify-send", "-a", "OmaScribe"]
     if urgent:
         args += ["-u", "critical"]
     run(args + [title, body], timeout=5)
@@ -207,11 +207,11 @@ def queue_join_reminder(event: dict) -> bool:
     if native:
         action = (f"{shlex.quote(sys.argv[0])} join-reminder --marker "
                   f"{shlex.quote(str(marker))}")
-        run([native, "--exec", action, "--app-name", "OmaMeet", "-g", "\uf274",
+        run([native, "--exec", action, "--app-name", "OmaScribe", "-g", "\uf274",
              "-u", "normal", "Meeting in 5 minutes  ·  JOIN ›",
              f"{time_label}  {title} · Click to join", "-t", "300000"], timeout=5)
     else:
-        notify("Meeting in 5 minutes", f"{time_label}  {title} · Open OmaMeet to join")
+        notify("Meeting in 5 minutes", f"{time_label}  {title} · Open OmaScribe to join")
     return True
 
 
@@ -342,8 +342,8 @@ def touch_heartbeat() -> None:
 # --------------------------------------------------------------------------
 
 def calendar_bin() -> str | None:
-    bundled = Path(__file__).resolve().with_name("omameet-calendar")
-    return str(bundled) if bundled.exists() else which("omarchy-calendar")
+    bundled = Path(__file__).resolve().with_name("omascribe-calendar")
+    return str(bundled) if bundled.exists() else which("omascribe-calendar")
 
 
 def calendar_agenda(day: str | None = None) -> dict | None:
@@ -412,7 +412,7 @@ def cmd_doctor(args) -> None:
     check("audio:monitor", sink, f"{sink}.monitor" if sink else "unavailable")
 
     cal = calendar_bin()
-    check("calendar:omameet", cal, cal or "not installed (standalone mode)")
+    check("calendar:omascribe", cal, cal or "not installed (standalone mode)")
     if cal:
         # Distinguish "the plugin cannot expose attendees" (a real capability gap
         # that degrades speaker mapping) from "there are simply no events to
@@ -446,7 +446,7 @@ def cmd_doctor(args) -> None:
         import transcribe as _t
         model = _t.find_model(cfg["transcription"]["model"])
         check("whisper:model", model, str(model) if model else
-              "no ggml model found — run: omarchy-meetings fetch-model")
+              "no ggml model found — run: omascribe-meetings fetch-model")
         import extract as _e  # noqa: F401
         import vault as _v    # noqa: F401
         check("lib:modules", True, "transcribe, extract, vault importable")
@@ -474,7 +474,7 @@ def supports_attendees(calendar_path: str) -> bool:
 
 
 def resolve_llm(cfg: dict | None = None) -> tuple[str | None, str]:
-    """Resolve the backend explicitly selected in OmaMeet's configuration.
+    """Resolve the backend explicitly selected in OmaScribe's configuration.
 
     Delegates to lib/extract so doctor and the pipeline can never disagree
     about which backend will actually be used.
@@ -537,7 +537,7 @@ def cmd_status(args) -> None:
         emit(payload, True)
     else:
         if payload["orphaned"]:
-            print("orphaned recording present — run 'omarchy-meetings record stop'")
+            print("orphaned recording present — run 'omascribe-meetings record stop'")
         elif payload["recording"]:
             print(f"recording: {sess.get('title')} since {sess.get('started')}")
         elif payload["paused"]:
@@ -1211,7 +1211,7 @@ def cmd_tick(args) -> None:
             # Prompting is deliberate: silently recording is worse than missing.
             notify("Call detected",
                    f"{app} is using the microphone. "
-                   f"Run 'omarchy-meetings record start' to capture.")
+                   f"Run 'omascribe-meetings record start' to capture.")
             actions.append(f"prompt:{app}")
             emit({"actions": actions, "state": "idle", "app": app, "window": window},
                  args.json, f"prompted for unplanned call ({app})")

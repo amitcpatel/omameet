@@ -1,10 +1,19 @@
 # Changelog
 
+## 0.5.0 — renamed to OmaScribe
+
+- Rename the product, plugin ID, repository, commands, runtime namespaces, UI,
+  and documentation from OmaMeet to OmaScribe to avoid colliding with the
+  independently published `dorneles.omameet` plugin.
+- Preserve local-development settings, recordings, calendar state, and Google
+  OAuth access through a non-destructive migration path.
+- Retain every security safeguard reviewed for the 0.4.2 submission.
+
 ## 0.4.2 — non-destructive optional installer
 
 - Refuse to overwrite regular files or foreign symlinks at either optional command-link destination.
 - Preflight both command destinations before creating either link, preventing partial installation on conflict.
-- Preserve and accept command links that already resolve to the same OmaMeet checkout.
+- Preserve and accept command links that already resolve to the same checkout.
 - Add behavioral installer and uninstaller regression coverage with an isolated `HOME`.
 
 ## 0.4.1 — verified model artifacts
@@ -22,7 +31,7 @@
 - Changed bar hover text to the next meeting or `No events`.
 - Replaced Claude/endpoint configuration with `omarchy-default-agent` resolution.
 - Added constrained single-turn Grok note optimization.
-- Required persisted OmaMeet-specific consent before sending transcripts to AI.
+- Required persisted application-specific consent before sending transcripts to AI.
 - Removed transcripts from Grok argv and cleaned ephemeral local session state.
 - Rejected private calendar-feed hosts and cross-origin redirects.
 - Added explicit prompt-injection boundaries for untrusted meeting content.

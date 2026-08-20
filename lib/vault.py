@@ -57,7 +57,7 @@ def frontmatter(meeting: dict, participants: list[dict], extracted: dict) -> str
         f"decisions: {len(extracted.get('decisions', []))}",
         f"needs_review: {sum(1 for c in extracted.get('commitments', []) if c.get('needs_human'))}",
         f"last_updated: {esc(datetime.now().astimezone().date().isoformat())}",
-        "generated: OmaMeet",
+        "generated: OmaScribe",
         "---",
         "",
     ]
@@ -91,7 +91,7 @@ def write_meeting(vault: Path, meeting: dict, participants: list[dict],
 
     contract = {
         "schema": 1,
-        "generated_by": "OmaMeet",
+        "generated_by": "OmaScribe",
         "generated_at": datetime.now().astimezone().isoformat(),
         "meeting": meeting,
         "participants": participants,

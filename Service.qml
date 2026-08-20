@@ -5,7 +5,7 @@ import qs.Commons
 import qs.Ui
 
 // Headless singleton: polls status and runs the meeting detector. All real
-// work happens in bin/omameet-meetings — never in QML, because
+  // work happens in bin/omascribe-meetings — never in QML, because
 // this runs inside the long-lived omarchy-shell process.
 Item {
   id: root
@@ -19,7 +19,7 @@ Item {
   // Absolute path — `omarchy plugin add <git-url>` runs no install hooks, so the
   // helper may not be on PATH.
   readonly property string helper:
-      Qt.resolvedUrl("bin/omameet-meetings").toString().replace("file://", "")
+      Qt.resolvedUrl("bin/omascribe-meetings").toString().replace("file://", "")
 
   Process {
     id: statusProc

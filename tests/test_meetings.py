@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests for omarchy-meetings. Standard library only (unittest)."""
+"""Tests for OmaScribe. Standard library only (unittest)."""
 import importlib.util
 import json
 import os
@@ -15,7 +15,7 @@ from unittest.mock import patch
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-HELPER = HERE.parent / "bin" / "omameet-meetings"
+HELPER = HERE.parent / "bin" / "omascribe-meetings"
 QML_DIR = HERE.parent
 
 
@@ -196,7 +196,7 @@ class UrlInstallTest(unittest.TestCase):
         offenders = []
         for qml in self.qml_files():
             for n, line in enumerate(qml.read_text().splitlines(), 1):
-                if '"omameet-meetings"' in line and "resolvedUrl" not in line:
+                if '"omascribe-meetings"' in line and "resolvedUrl" not in line:
                     offenders.append(f"{qml.name}:{n}: {line.strip()}")
         self.assertEqual(offenders, [],
                          "QML must resolve the helper by absolute path, not PATH:\n"
@@ -207,13 +207,13 @@ class UrlInstallTest(unittest.TestCase):
                  if "Process" in q.read_text() and "command:" in q.read_text()]
         self.assertTrue(users, "expected at least one QML file to run the helper")
         for qml in users:
-            self.assertIn('Qt.resolvedUrl("bin/omameet-', qml.read_text(),
+            self.assertIn('Qt.resolvedUrl("bin/omascribe-', qml.read_text(),
                           f"{qml.name} must resolve the helper from the plugin dir")
 
     def test_helper_is_executable(self):
         """git preserves the exec bit; without it the widget cannot run."""
         self.assertTrue(os.access(HELPER, os.X_OK),
-                        "bin/omameet-meetings must be committed executable (git mode 100755)")
+                        "bin/omascribe-meetings must be committed executable (git mode 100755)")
 
     def test_helper_has_shebang(self):
         self.assertTrue(HELPER.read_text().startswith("#!/usr/bin/env python3"))
@@ -303,7 +303,7 @@ class HelperTest(unittest.TestCase):
     def test_transcription_defaults_local(self):
         self.assertEqual(self.mod.DEFAULT_CONFIG["transcription"]["backend"], "local")
 
-    def test_ai_notes_require_omameet_specific_consent(self):
+    def test_ai_notes_require_omascribe_specific_consent(self):
         self.assertEqual(self.mod.DEFAULT_CONFIG["llm"]["backend"], "disabled")
 
     def test_processing_lock_is_exclusive(self):
@@ -367,8 +367,8 @@ class CliTest(unittest.TestCase):
     def test_version_json(self):
         r = self.run_cli("version", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertEqual(json.loads(r.stdout)["name"], "omarchy-meetings")
-        self.assertEqual(json.loads(r.stdout)["version"], "0.4.1")
+        self.assertEqual(json.loads(r.stdout)["name"], "omascribe")
+        self.assertEqual(json.loads(r.stdout)["version"], "0.5.0")
 
     def test_fetch_model_rejects_path_traversal(self):
         r = self.run_cli("fetch-model", "../evil", "--json")
@@ -792,19 +792,19 @@ class CalendarCapabilityTest(unittest.TestCase):
 
     def test_detects_patched_calendar(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "omarchy-calendar"
+            path = Path(d) / "omascribe-calendar"
             path.write_text('def attendees(event):\n    return []\n'
                             '.. "attendees": attendees(event),\n')
             self.assertTrue(self.mod.supports_attendees(str(path)))
 
     def test_detects_unpatched_calendar(self):
         with tempfile.TemporaryDirectory() as d:
-            path = Path(d) / "omarchy-calendar"
+            path = Path(d) / "omascribe-calendar"
             path.write_text('def normalize(e):\n    return {"id": e["id"]}\n')
             self.assertFalse(self.mod.supports_attendees(str(path)))
 
     def test_missing_file_is_not_capable(self):
-        self.assertFalse(self.mod.supports_attendees("/nonexistent/omarchy-calendar"))
+        self.assertFalse(self.mod.supports_attendees("/nonexistent/omascribe-calendar"))
 
 
 class AutopilotTest(unittest.TestCase):
@@ -937,7 +937,7 @@ class AutopilotCliTest(unittest.TestCase):
                                  "owner": {"name": "Sidd"}, "text": "send deck",
                                  "due": {"value": "2020-01-01"}}],
             }))
-            cfgdir = Path(d) / "config" / "omarchy-meetings"
+            cfgdir = Path(d) / "config" / "omascribe"
             cfgdir.mkdir(parents=True)
             (cfgdir / "config.json").write_text(json.dumps(
                 {"vault": {"path": str(Path(d) / "vault")}}))

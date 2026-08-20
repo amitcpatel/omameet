@@ -1,8 +1,8 @@
-# OmaMeet 0.4.1 release status
+# OmaScribe 0.5.0 release status
 
 ## Product direction
 
-OmaMeet 0.4.1 is the personal-first, opinionated Omarchy meeting assistant:
+OmaScribe 0.5.0 is the personal-first, opinionated Omarchy meeting assistant:
 
 - Google Calendar through the user's GCP OAuth project.
 - Scheduled and ad-hoc recording from the shell panel.
@@ -37,12 +37,12 @@ Before tagging or marketplace submission, require:
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile bin/omameet-calendar bin/omameet-meetings lib/*.py
+python -m py_compile bin/omascribe-calendar bin/omascribe-meetings lib/*.py
 bash -n install.sh uninstall.sh
 omarchy plugin validate .
 git diff --check
 ```
 
-Marketplace resubmission and a `v0.4.1` tag must reference the same validated
-commit. Version 0.4.0 was tagged before the final model-integrity finding and is
-not the marketplace submission candidate.
+The renamed marketplace submission and a `v0.5.0` tag must reference the same
+validated commit. Earlier OmaMeet tags remain historical and are not marketplace
+submission candidates.

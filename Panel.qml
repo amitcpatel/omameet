@@ -6,8 +6,8 @@ import qs.Ui
 
 Panel {
   id: root
-  moduleName: "acp.omameet"
-  ipcTarget: "acp.omameet"
+  moduleName: "acp.omascribe"
+  ipcTarget: "acp.omascribe"
   manageIpc: false
 
   property var anchorItem: null
@@ -30,9 +30,9 @@ Panel {
   property bool aiChanging: false
 
   readonly property string calendarHelper:
-      Qt.resolvedUrl("bin/omameet-calendar").toString().replace("file://", "")
+      Qt.resolvedUrl("bin/omascribe-calendar").toString().replace("file://", "")
   readonly property string meetingsHelper:
-      Qt.resolvedUrl("bin/omameet-meetings").toString().replace("file://", "")
+      Qt.resolvedUrl("bin/omascribe-meetings").toString().replace("file://", "")
 
   readonly property color foreground: Color.popups.text
   readonly property color muted: Color.muted
@@ -417,7 +417,7 @@ Panel {
           anchors.bottomMargin: Style.spacing.md
           spacing: Style.spacing.sm
           Button { text: root.loading ? "…" : "\uf021"; tooltipText: root.loading ? "Refreshing calendar" : "Refresh calendar"; foreground: root.foreground; accent: root.accent; enabled: !root.loading; onClicked: root.refresh(true) }
-          Button { text: "\uf013"; tooltipText: "OmaMeet settings"; foreground: root.foreground; accent: root.accent; onClicked: root.openSettings() }
+          Button { text: "\uf013"; tooltipText: "OmaScribe settings"; foreground: root.foreground; accent: root.accent; onClicked: root.openSettings() }
         }
         Row {
           visible: root.showingCalendars
@@ -427,7 +427,7 @@ Panel {
           anchors.rightMargin: Style.spacing.panelPadding
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.spacing.sm
-          Text { width: parent.width - addAccountButton.width - doneButton.width - parent.spacing * 2; anchors.verticalCenter: parent.verticalCenter; text: "OmaMeet Settings"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight }
+          Text { width: parent.width - addAccountButton.width - doneButton.width - parent.spacing * 2; anchors.verticalCenter: parent.verticalCenter; text: "OmaScribe Settings"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight }
           Button { id: addAccountButton; anchors.verticalCenter: parent.verticalCenter; text: addAccountProcess.running ? "Connecting…" : "Add Google"; tooltipText: "Connect Google Calendar using your GCP OAuth project"; foreground: root.foreground; accent: root.accent; enabled: !addAccountProcess.running; bordered: true; onClicked: addAccountProcess.running = true }
           Button { id: doneButton; anchors.verticalCenter: parent.verticalCenter; text: "Done"; foreground: root.foreground; accent: root.accent; selected: true; onClicked: { root.showingCalendars = false; root.refresh(false); Qt.callLater(root.scrollToNow) } }
         }
@@ -472,7 +472,7 @@ Panel {
           Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.md; text: root.aiDetail; textFormat: Text.PlainText; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap }
           PanelSeparator { width: parent.width; foreground: root.foreground }
           Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.sm; text: "GOOGLE CALENDAR"; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1 }
-          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.md; text: "Use Add Google above to connect an account through your GCP OAuth project, then choose which calendars OmaMeet displays and records."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.Wrap }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.md; text: "Use Add Google above to connect an account through your GCP OAuth project, then choose which calendars OmaScribe displays and records."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.Wrap }
           PanelSeparator { width: parent.width; foreground: root.foreground }
           Text { width: parent.width; leftPadding: Style.spacing.panelPadding; topPadding: Style.spacing.lg; bottomPadding: Style.spacing.md; text: "Choose visibility and cycle each calendar's priority"; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           Repeater {

@@ -4,7 +4,7 @@ import qs.Ui
 
 BarWidget {
   id: root
-  moduleName: "acp.omameet"
+  moduleName: "acp.omascribe"
 
   function injectPanel() {
     var target = panelLoader.item
@@ -42,7 +42,7 @@ BarWidget {
     text: root.recording ? "\uf111" : "\uf274"
     active: root.recording
     slotSize: Style.bar.statusSlot
-    tooltipText: panelLoader.item ? panelLoader.item.tooltip : "OmaMeet"
+    tooltipText: panelLoader.item ? panelLoader.item.tooltip : "OmaScribe"
     onPressed: function(b) {
       if (!root.bar || !panelLoader.item) return
       if (b === Qt.RightButton) root.openSettings()

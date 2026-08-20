@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""OAuth and Google Calendar helper for the Omarchy Calendar plugin."""
+"""OAuth and Google Calendar helper for OmaScribe."""
 
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-APP = "omarchy-calendar"
+APP = "omascribe-calendar"
+LEGACY_KEYRING_APP = "omarchy-calendar"
 SCOPE = "openid email https://www.googleapis.com/auth/calendar.readonly"
 CONFIG = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / APP
 STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / APP
@@ -133,7 +134,7 @@ def read_ical_source(feed: dict) -> str:
         validate_remote_calendar_url(source)
         request = urllib.request.Request(source, headers={
             "Accept": "text/calendar, text/plain;q=0.9, */*;q=0.1",
-            "User-Agent": "OmaMeet/0.3",
+            "User-Agent": "OmaScribe/0.5",
         })
         opener = urllib.request.build_opener(SameOriginHttpsRedirectHandler())
         with opener.open(request, timeout=20) as response:
@@ -448,19 +449,23 @@ def update_feed(feed_id: str, **changes: object) -> None:
 
 def store_token(account_id: str, token: str) -> None:
     subprocess.run(
-        ["secret-tool", "store", "--label", f"Omarchy Calendar: {account_id}", "application", APP, "account", account_id],
+        ["secret-tool", "store", "--label", f"OmaScribe Calendar: {account_id}", "application", APP, "account", account_id],
         input=token, text=True, check=True,
     )
 
 
 def load_token(account_id: str) -> str:
-    result = subprocess.run(
-        ["secret-tool", "lookup", "application", APP, "account", account_id],
-        text=True, capture_output=True, check=True,
-    )
-    if not result.stdout.strip():
-        raise RuntimeError("refresh token missing from keyring")
-    return result.stdout.strip()
+    for application in (APP, LEGACY_KEYRING_APP):
+        result = subprocess.run(
+            ["secret-tool", "lookup", "application", application, "account", account_id],
+            text=True, capture_output=True, check=False,
+        )
+        token = result.stdout.strip() if result.returncode == 0 else ""
+        if token:
+            if application == LEGACY_KEYRING_APP:
+                store_token(account_id, token)
+            return token
+    raise RuntimeError("refresh token missing from keyring")
 
 
 def access_token(account: dict) -> str:
@@ -767,7 +772,7 @@ def apply_overlap_layout(events: list[dict]) -> None:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(prog="omarchy-calendar")
+    parser = argparse.ArgumentParser(prog="omascribe-calendar")
     commands = parser.add_subparsers(dest="command", required=True)
     account = commands.add_parser("account")
     account_commands = account.add_subparsers(dest="account_command", required=True)
