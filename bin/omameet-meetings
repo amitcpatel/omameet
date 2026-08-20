@@ -23,12 +23,13 @@ import signal
 import subprocess
 import sys
 import time
+import urllib.parse
 import wave
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omarchy-meetings"
-VERSION = "0.3.5"
+VERSION = "0.4.0"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -86,7 +87,7 @@ DEFAULT_CONFIG = {
         "appDenylist": [],
     },
     "transcription": {"backend": "local", "model": "large-v3-turbo", "lang": "en"},
-    "llm": {"backend": "disabled"},
+    "llm": {"backend": "omarchy"},
     "notify": {"desktop": True, "joinReminderMin": 5},
     "audit": {"nightly": True, "alertOnMiss": True},
     "retainAudio": False,
@@ -748,10 +749,8 @@ def cmd_config(args) -> None:
 
 
 def cmd_ai(args) -> None:
-    """Require an OmaMeet-specific choice before any transcript reaches AI."""
+    """Turn optimization through Omarchy's selected default agent on or off."""
     cfg = config()
-    if args.action == "enable" and not args.backend:
-        fail("choose a tool-free AI backend: claude or endpoint")
     if args.action == "status":
         selected = cfg.get("llm", {}).get("backend", "disabled")
         backend, detail = resolve_llm(cfg)
@@ -765,10 +764,14 @@ def cmd_ai(args) -> None:
         emit({"enabled": False, "selected": "disabled"}, args.json,
              "AI notes disabled; transcripts will stay local")
         return
-    cfg["llm"] = {"backend": args.backend}
+    candidate = deep_merge(cfg, {"llm": {"backend": "omarchy"}})
+    backend, detail = resolve_llm(candidate)
+    if backend is None:
+        fail(detail, notify_user=False)
+    cfg["llm"] = {"backend": "omarchy"}
     save_config(cfg)
-    emit({"enabled": True, "selected": args.backend}, args.json,
-         f"AI notes enabled with {args.backend}; meeting transcript text may leave this machine")
+    emit({"enabled": True, "selected": "omarchy", "detail": detail}, args.json,
+         f"AI-optimized notes enabled — {detail}")
 
 
 def vault_dir(cfg: dict) -> Path:
@@ -909,11 +912,15 @@ def cmd_process(args) -> None:
 
 
 def detect_platform(url: str) -> str | None:
-    url = (url or "").lower()
-    for needle, name in (("meet.google", "google_meet"), ("zoom.", "zoom"),
-                         ("teams.", "teams"), ("webex", "webex")):
-        if needle in url:
-            return name
+    host = (urllib.parse.urlparse(url or "").hostname or "").lower()
+    if host == "meet.google.com":
+        return "google_meet"
+    if host == "zoom.us" or host.endswith(".zoom.us"):
+        return "zoom"
+    if host == "teams.microsoft.com":
+        return "teams"
+    if host == "webex.com" or host.endswith(".webex.com"):
+        return "webex"
     return None
 
 
@@ -1215,6 +1222,8 @@ def cmd_fetch_model(args) -> None:
     """Download a whisper.cpp ggml model into the user's data dir."""
     import urllib.request
     name = args.model
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        fail("invalid model name")
     dest_dir = Path.home() / ".local/share/whisper.cpp/models"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"ggml-{name}.bin"
@@ -1261,9 +1270,8 @@ def build_parser() -> argparse.ArgumentParser:
     add("heartbeat", help="mark the service alive").set_defaults(func=cmd_heartbeat)
     add("version").set_defaults(func=cmd_version)
 
-    ai = add("ai", help="explicitly enable, disable, or inspect AI notes")
+    ai = add("ai", help="enable, disable, or inspect AI-optimized notes")
     ai.add_argument("action", choices=("enable", "disable", "status"))
-    ai.add_argument("backend", nargs="?", choices=("claude", "endpoint"))
     ai.set_defaults(func=cmd_ai)
 
     nxt = add("next", help="today's meetings and whether they'll be recorded")

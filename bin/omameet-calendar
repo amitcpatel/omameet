@@ -33,7 +33,7 @@ PREFERENCES_FILE = STATE / "preferences.json"
 FEEDS_FILE = STATE / "feeds.json"
 CACHE_DIR = STATE / "agenda-cache"
 CACHE_TTL_SECONDS = 300
-URL_RE = re.compile(r"https://(?:meet\.google\.com|[\w.-]*zoom\.us|teams\.microsoft\.com|[\w.-]*webex\.com)/[^\s<>\"]+", re.I)
+URL_RE = re.compile(r"https://(?:meet\.google\.com|(?:[\w-]+\.)*zoom\.us|teams\.microsoft\.com|(?:[\w-]+\.)*webex\.com)/[^\s<>\"]+", re.I)
 PRIORITIES = ("family", "work", "normal", "informational")
 
 
@@ -68,6 +68,8 @@ def add_feed(source: str, name: str | None = None) -> dict:
         if not path.is_file():
             raise ValueError("iCalendar source must be an https URL or readable .ics file")
         source = path.as_uri()
+    elif parsed.scheme == "file":
+        raise ValueError("use a local .ics path instead of a file URL")
     elif parsed.scheme == "http":
         raise ValueError("calendar subscriptions must use https")
     feed_id = hashlib.sha256(source.encode()).hexdigest()[:16]

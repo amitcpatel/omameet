@@ -17,6 +17,7 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.parse
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -90,13 +91,13 @@ def event_matches_capture_app(event: dict, app: str | None) -> bool:
     unrelated Meet call.
     """
     client = (app or "").lower()
-    url = (event.get("joinUrl") or "").lower()
+    host = (urllib.parse.urlparse(event.get("joinUrl") or "").hostname or "").lower()
     if any(name in client for name in ("chrome", "chromium", "brave", "firefox", "edge")):
-        return "meet.google" in url
+        return host == "meet.google.com"
     if "zoom" in client:
-        return "zoom." in url
+        return host == "zoom.us" or host.endswith(".zoom.us")
     if "teams" in client:
-        return "teams." in url or "teams.microsoft" in url
+        return host == "teams.microsoft.com"
     return False
 
 

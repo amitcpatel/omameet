@@ -25,8 +25,9 @@ Panel {
   property string selectedDate: todayKey()
   property bool recording: false
   property string recordingTitle: ""
-  property string sourceName: ""
-  property string sourceUrl: ""
+  property bool aiEnabled: false
+  property string aiDetail: "AI notes disabled; transcripts stay local"
+  property bool aiChanging: false
 
   readonly property string calendarHelper:
       Qt.resolvedUrl("bin/omameet-calendar").toString().replace("file://", "")
@@ -71,7 +72,7 @@ Panel {
   }
   function goToday() { selectedDate = todayKey(); refresh(false) }
   function open() { showingCalendars = false; root.controller.show(); refresh(false) }
-  function openSettings() { showingCalendars = true; root.controller.show(); loadCalendars() }
+  function openSettings() { showingCalendars = true; root.controller.show(); loadCalendars(); refreshAiStatus() }
   function close() { root.controller.hide() }
   function toggle() { if (root.opened) close(); else open() }
   function refresh(force) {
@@ -104,13 +105,6 @@ Panel {
     } catch (e) { errorText = "Could not read calendar data" }
   }
   function loadCalendars() { if (!calendarListProcess.running) calendarListProcess.running = true }
-  function addIcalSource() {
-    var value = sourceUrl.trim()
-    if (!value || addSourceProcess.running) return
-    addSourceProcess.command = [calendarHelper, "source", "add", value]
-    if (sourceName.trim()) addSourceProcess.command.push("--name", sourceName.trim())
-    addSourceProcess.running = true
-  }
   function applyCalendars(value) {
     try {
       var payload = JSON.parse(String(value || "{}"))
@@ -118,6 +112,14 @@ Panel {
       if (payload.errors && payload.errors.length)
         errorText = payload.errors.map(function(e) { return e.message || "Could not list calendars" }).join(" · ")
     } catch (e) { errorText = "Could not read calendar settings" }
+  }
+  function refreshAiStatus() { if (!aiStatusProcess.running) aiStatusProcess.running = true }
+  function setAiEnabled(enabled) {
+    if (aiChanging) return
+    aiChanging = true
+    errorText = ""
+    if (enabled) aiEnableProcess.running = true
+    else aiDisableProcess.running = true
   }
   function updateCalendar(index, field, value) {
     var updated = calendars.slice()
@@ -202,7 +204,7 @@ Panel {
     var events = agenda.events || []
     for (var i = 0; i < events.length; i++)
       if (!events[i].allDay && new Date(events[i].end).getTime() > nowMs) return events[i].timeLabel + "  " + events[i].title
-    return "No more events today"
+    return "No events"
   }
   function eventEnded(event) { return new Date(event.end).getTime() <= nowMs }
   function eventText(event) { return eventEnded(event) ? muted : foreground }
@@ -252,6 +254,28 @@ Panel {
   Process { id: openProcess }
   Process { id: joinProcess; onExited: function(code) { if (code !== 0) root.errorText = "Could not join and start recording"; root.refreshRecording() } }
   Process {
+    id: recordProcess
+    command: [root.meetingsHelper, "record", "start"]
+    onExited: function(code) {
+      if (code !== 0) root.errorText = "Could not start ad-hoc recording"
+      root.refreshRecording()
+    }
+  }
+  Process {
+    id: stopProcess
+    command: [root.meetingsHelper, "record", "stop"]
+    onExited: function(code) {
+      if (code !== 0) root.errorText = "Could not stop recording"
+      root.refreshRecording()
+    }
+  }
+  function toggleAdHocRecording() {
+    if (recordProcess.running || stopProcess.running) return
+    errorText = ""
+    if (recording) stopProcess.running = true
+    else recordProcess.running = true
+  }
+  Process {
     id: recordingStatusProcess
     command: [root.meetingsHelper, "status", "--json"]
     stdout: StdioCollector {
@@ -288,14 +312,35 @@ Panel {
     }
   }
   Process {
-    id: addSourceProcess
+    id: aiStatusProcess
+    command: [root.meetingsHelper, "ai", "status", "--json"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        try {
+          var payload = JSON.parse(text)
+          root.aiEnabled = payload.enabled === true
+          root.aiDetail = payload.detail || (root.aiEnabled ? "Omarchy default AI enabled" : "AI notes disabled; transcripts stay local")
+        } catch (e) { root.aiDetail = "Could not read AI settings" }
+      }
+    }
+  }
+  Process {
+    id: aiEnableProcess
+    command: [root.meetingsHelper, "ai", "enable", "--json"]
     onExited: function(code) {
-      if (code === 0) {
-        root.sourceName = ""
-        root.sourceUrl = ""
-        root.loadCalendars()
-        root.refresh(true)
-      } else root.errorText = "Could not add iCalendar source — check the URL and try again"
+      root.aiChanging = false
+      if (code !== 0) root.errorText = "Could not enable Omarchy's default AI for meeting notes"
+      root.refreshAiStatus()
+    }
+  }
+  Process {
+    id: aiDisableProcess
+    command: [root.meetingsHelper, "ai", "disable", "--json"]
+    onExited: function(code) {
+      root.aiChanging = false
+      if (code !== 0) root.errorText = "Could not disable AI notes"
+      root.refreshAiStatus()
     }
   }
   Timer { interval: root.refreshIntervalSec * 1000; repeat: true; running: true; triggeredOnStart: true; onTriggered: root.refresh(true) }
@@ -328,24 +373,51 @@ Panel {
       Item {
         id: panelHeader
         width: parent.width
-        height: Style.space(92)
-        Button { visible: !root.showingCalendars; anchors.left: parent.left; anchors.leftMargin: Style.spacing.panelPadding; anchors.verticalCenter: parent.verticalCenter; text: "‹"; tooltipText: "Previous day"; foreground: root.foreground; accent: root.accent; onClicked: root.shiftDay(-1) }
-        Column {
+        height: root.showingCalendars ? Style.space(92) : Style.space(124)
+        Item {
           visible: !root.showingCalendars
-          anchors.centerIn: parent
-          spacing: Style.spacing.xs
-          Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.dateTitle(); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
-          Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.dateSubtitle(); color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.top: parent.top
+          height: Style.space(72)
+          Button { anchors.left: parent.left; anchors.leftMargin: Style.spacing.panelPadding; anchors.verticalCenter: parent.verticalCenter; text: "‹"; tooltipText: "Previous day"; foreground: root.foreground; accent: root.accent; onClicked: root.shiftDay(-1) }
+          Column {
+            anchors.centerIn: parent
+            spacing: Style.spacing.xs
+            Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.dateTitle(); color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true }
+            Text { anchors.horizontalCenter: parent.horizontalCenter; text: root.dateSubtitle(); color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall }
+          }
+          Button { anchors.right: parent.right; anchors.rightMargin: Style.spacing.panelPadding; anchors.verticalCenter: parent.verticalCenter; text: "›"; tooltipText: "Next day"; foreground: root.foreground; accent: root.accent; onClicked: root.shiftDay(1) }
+        }
+        Row {
+          visible: !root.showingCalendars
+          anchors.left: parent.left
+          anchors.leftMargin: Style.spacing.panelPadding
+          anchors.bottom: parent.bottom
+          anchors.bottomMargin: Style.spacing.md
+          spacing: Style.spacing.sm
+          Button {
+            // Font Awesome stop/record glyphs from Omarchy's Nerd Font.
+            // Keep them escaped: raw private-use glyphs can disappear in transit.
+            text: root.recording ? "\uf04d  Stop" : "\uf111  Record"
+            tooltipText: root.recording ? "Stop recording and process notes" : "Start an ad-hoc recording"
+            foreground: root.foreground
+            accent: root.accent
+            selected: root.recording
+            enabled: !recordProcess.running && !stopProcess.running
+            onClicked: root.toggleAdHocRecording()
+          }
+          Button { visible: root.selectedDate !== root.todayKey(); text: "Back to Today"; foreground: root.foreground; accent: root.accent; onClicked: root.goToday() }
         }
         Row {
           visible: !root.showingCalendars
           anchors.right: parent.right
           anchors.rightMargin: Style.spacing.panelPadding
-          anchors.verticalCenter: parent.verticalCenter
+          anchors.bottom: parent.bottom
+          anchors.bottomMargin: Style.spacing.md
           spacing: Style.spacing.sm
-          Button { visible: root.selectedDate !== root.todayKey(); text: "Today"; foreground: root.foreground; accent: root.accent; onClicked: root.goToday() }
-          Button { text: root.loading ? "Refreshing…" : "Refresh"; tooltipText: "Fetch the latest events"; foreground: root.foreground; accent: root.accent; onClicked: root.refresh(true) }
-          Button { text: "›"; tooltipText: "Next day"; foreground: root.foreground; accent: root.accent; onClicked: root.shiftDay(1) }
+          Button { text: root.loading ? "…" : "\uf021"; tooltipText: root.loading ? "Refreshing calendar" : "Refresh calendar"; foreground: root.foreground; accent: root.accent; enabled: !root.loading; onClicked: root.refresh(true) }
+          Button { text: "\uf013"; tooltipText: "OmaMeet settings"; foreground: root.foreground; accent: root.accent; onClicked: root.openSettings() }
         }
         Row {
           visible: root.showingCalendars
@@ -355,8 +427,8 @@ Panel {
           anchors.rightMargin: Style.spacing.panelPadding
           anchors.verticalCenter: parent.verticalCenter
           spacing: Style.spacing.sm
-          Text { width: parent.width - addAccountButton.width - doneButton.width - parent.spacing * 2; anchors.verticalCenter: parent.verticalCenter; text: "Calendars"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight }
-          Button { id: addAccountButton; anchors.verticalCenter: parent.verticalCenter; text: addAccountProcess.running ? "Connecting…" : "Google"; tooltipText: "Connect a Google Calendar account"; foreground: root.foreground; accent: root.accent; enabled: !addAccountProcess.running; bordered: true; onClicked: addAccountProcess.running = true }
+          Text { width: parent.width - addAccountButton.width - doneButton.width - parent.spacing * 2; anchors.verticalCenter: parent.verticalCenter; text: "OmaMeet Settings"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.title; font.bold: true; elide: Text.ElideRight }
+          Button { id: addAccountButton; anchors.verticalCenter: parent.verticalCenter; text: addAccountProcess.running ? "Connecting…" : "Add Google"; tooltipText: "Connect Google Calendar using your GCP OAuth project"; foreground: root.foreground; accent: root.accent; enabled: !addAccountProcess.running; bordered: true; onClicked: addAccountProcess.running = true }
           Button { id: doneButton; anchors.verticalCenter: parent.verticalCenter; text: "Done"; foreground: root.foreground; accent: root.accent; selected: true; onClicked: { root.showingCalendars = false; root.refresh(false); Qt.callLater(root.scrollToNow) } }
         }
       }
@@ -383,17 +455,24 @@ Panel {
           spacing: Style.spacing.sm
           topPadding: Style.spacing.xxl
           bottomPadding: Style.spacing.xxl
-          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.sm; text: "Add a private iCalendar subscription — no Google Cloud project required"; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.Wrap }
-          Row {
-            width: parent.width
-            leftPadding: Style.spacing.panelPadding
-            rightPadding: Style.spacing.panelPadding
-            spacing: Style.spacing.sm
-            TextField { id: sourceNameField; width: Style.space(120); placeholderText: "Name"; text: root.sourceName; foreground: root.foreground; accent: root.accent; onTextChanged: root.sourceName = text }
-            TextField { id: sourceUrlField; width: parent.width - sourceNameField.width - addSourceButton.width - parent.spacing * 2 - parent.leftPadding - parent.rightPadding; placeholderText: "https://…/calendar.ics"; text: root.sourceUrl; foreground: root.foreground; accent: root.accent; onTextChanged: root.sourceUrl = text; onAccepted: root.addIcalSource() }
-            Button { id: addSourceButton; text: addSourceProcess.running ? "Adding…" : "Add"; foreground: root.foreground; accent: root.accent; selected: root.sourceUrl.trim() !== ""; enabled: root.sourceUrl.trim() !== "" && !addSourceProcess.running; onClicked: root.addIcalSource() }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.sm; text: "AI NOTES"; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1 }
+          PlainTextToggle {
+            width: parent.width - Style.spacing.panelPadding * 2
+            anchors.horizontalCenter: parent.horizontalCenter
+            label: root.aiChanging ? "Updating AI notes…" : "AI-optimized meeting notes"
+            description: root.aiEnabled
+              ? "Uses the default AI agent selected in Omarchy. Agent tools, web search, and subagents are disabled."
+              : "Off — transcription stays local and OmaMeet produces basic notes without AI optimization."
+            checked: root.aiEnabled
+            enabled: !root.aiChanging
+            foreground: root.foreground
+            accent: root.accent
+            onClicked: root.setAiEnabled(!root.aiEnabled)
           }
-          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; topPadding: Style.spacing.md; bottomPadding: Style.spacing.md; text: "Use the secret subscription URL from Google Calendar, iCloud, Fastmail, Outlook, or another calendar provider. OmaMeet stores it locally with private permissions."; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.md; text: root.aiDetail; textFormat: Text.PlainText; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; wrapMode: Text.Wrap }
+          PanelSeparator { width: parent.width; foreground: root.foreground }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.sm; text: "GOOGLE CALENDAR"; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; font.bold: true; font.letterSpacing: 1 }
+          Text { width: parent.width; leftPadding: Style.spacing.panelPadding; rightPadding: Style.spacing.panelPadding; bottomPadding: Style.spacing.md; text: "Use Add Google above to connect an account through your GCP OAuth project, then choose which calendars OmaMeet displays and records."; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.Wrap }
           PanelSeparator { width: parent.width; foreground: root.foreground }
           Text { width: parent.width; leftPadding: Style.spacing.panelPadding; topPadding: Style.spacing.lg; bottomPadding: Style.spacing.md; text: "Choose visibility and cycle each calendar's priority"; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption }
           Repeater {

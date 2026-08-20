@@ -94,6 +94,11 @@ END:VCALENDAR
         with self.assertRaisesRegex(ValueError, "https"):
             calendar.add_feed("http://example.com/calendar.ics", "Work")
 
+    def test_feed_add_rejects_file_url(self):
+        calendar = load_module()
+        with self.assertRaisesRegex(ValueError, "local .ics path"):
+            calendar.add_feed("file:///etc/passwd", "Unsafe")
+
     def test_feed_preferences_are_stored_with_private_permissions(self):
         calendar = load_module()
         with tempfile.TemporaryDirectory() as directory:
@@ -120,6 +125,15 @@ END:VCALENDAR
         calendar = load_module()
         event = {"description": "Join us at https://meet.google.com/abc-defg-hij for the call."}
         self.assertEqual(calendar.meeting_url(event), "https://meet.google.com/abc-defg-hij")
+
+    def test_meeting_url_rejects_lookalike_domains(self):
+        calendar = load_module()
+        for host in ("evilzoom.us", "notwebex.com", "zoom.us.attacker.example"):
+            event = {"description": f"Join https://{host}/meeting"}
+            self.assertEqual(calendar.meeting_url(event), "", host)
+        self.assertEqual(
+            calendar.meeting_url({"description": "Join https://acme.zoom.us/meeting"}),
+            "https://acme.zoom.us/meeting")
 
     def test_normalize_all_day(self):
         calendar = load_module()

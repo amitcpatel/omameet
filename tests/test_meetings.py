@@ -128,6 +128,28 @@ class ThemeComplianceTest(unittest.TestCase):
         self.assertIn('meetingsHelper, "join"', source)
         self.assertIn('onClicked: root.joinMeeting(modelData)', source)
 
+    def test_panel_exposes_ad_hoc_recording_control(self):
+        source = (QML_DIR / "Panel.qml").read_text()
+        self.assertIn('command: [root.meetingsHelper, "record", "start"]', source)
+        self.assertIn('command: [root.meetingsHelper, "record", "stop"]', source)
+        self.assertIn('function toggleAdHocRecording()', source)
+        self.assertIn('onClicked: root.toggleAdHocRecording()', source)
+        icon_line = next(line for line in source.splitlines()
+                         if 'text: root.recording ?' in line and '\\uf04d' in line)
+        self.assertIn('"\\uf111  Record"', icon_line)
+        self.assertIn('"\\uf04d  Stop"', icon_line)
+
+    def test_settings_use_omarchy_default_ai(self):
+        source = (QML_DIR / "Panel.qml").read_text()
+        self.assertIn('text: "\\uf013"', source)
+        self.assertIn('command: [root.meetingsHelper, "ai", "status", "--json"]', source)
+        self.assertIn('command: [root.meetingsHelper, "ai", "enable", "--json"]', source)
+        self.assertIn('command: [root.meetingsHelper, "ai", "disable", "--json"]', source)
+        self.assertIn("default AI agent selected in Omarchy", source)
+        self.assertNotIn("iCalendar subscription", source)
+        self.assertNotIn("Right-click for settings", source)
+        self.assertIn('return "No events"', source)
+
     def test_calendar_controlled_text_is_always_plain_text(self):
         """Calendar HTML must never be interpreted inside omarchy-shell."""
         panel = (QML_DIR / "Panel.qml").read_text()
@@ -258,6 +280,8 @@ class HelperTest(unittest.TestCase):
         self.assertFalse(autopilot.event_matches_capture_app(zoom, "chrome"))
         self.assertTrue(autopilot.event_matches_capture_app(zoom, "zoom"))
         self.assertTrue(autopilot.event_matches_capture_app(teams, "teams-for-linux"))
+        self.assertFalse(autopilot.event_matches_capture_app(
+            {"joinUrl": "https://evilzoom.us/call"}, "zoom"))
 
     def test_join_reminder_uses_persistent_omarchy_click_action(self):
         source = HELPER.read_text()
@@ -273,8 +297,8 @@ class HelperTest(unittest.TestCase):
     def test_transcription_defaults_local(self):
         self.assertEqual(self.mod.DEFAULT_CONFIG["transcription"]["backend"], "local")
 
-    def test_ai_notes_default_disabled(self):
-        self.assertEqual(self.mod.DEFAULT_CONFIG["llm"]["backend"], "disabled")
+    def test_ai_notes_follow_omarchy_default(self):
+        self.assertEqual(self.mod.DEFAULT_CONFIG["llm"]["backend"], "omarchy")
 
     def test_processing_lock_is_exclusive(self):
         """Two processors must never race and overwrite audio audit evidence."""
@@ -338,6 +362,12 @@ class CliTest(unittest.TestCase):
         r = self.run_cli("version", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["name"], "omarchy-meetings")
+        self.assertEqual(json.loads(r.stdout)["version"], "0.4.0")
+
+    def test_fetch_model_rejects_path_traversal(self):
+        r = self.run_cli("fetch-model", "../evil", "--json")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("invalid model name", r.stderr)
 
     def test_status_json_is_parseable(self):
         with tempfile.TemporaryDirectory() as d:
@@ -351,14 +381,11 @@ class CliTest(unittest.TestCase):
             r = self.run_cli("config", env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertFalse(json.loads(r.stdout)["retainAudio"])
-            self.assertEqual(json.loads(r.stdout)["llm"]["backend"], "disabled")
+            self.assertEqual(json.loads(r.stdout)["llm"]["backend"], "omarchy")
 
-    def test_ai_opt_in_roundtrip(self):
+    def test_ai_disable_roundtrip(self):
         with tempfile.TemporaryDirectory() as d:
             env = {"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d}
-            enabled = self.run_cli("ai", "enable", "claude", "--json", env=env)
-            self.assertEqual(enabled.returncode, 0, enabled.stderr)
-            self.assertEqual(json.loads(enabled.stdout)["selected"], "claude")
             status = self.run_cli("ai", "status", "--json", env=env)
             self.assertTrue(json.loads(status.stdout)["enabled"])
             disabled = self.run_cli("ai", "disable", "--json", env=env)
@@ -366,15 +393,9 @@ class CliTest(unittest.TestCase):
             status = self.run_cli("ai", "status", "--json", env=env)
             self.assertFalse(json.loads(status.stdout)["enabled"])
 
-    def test_ai_enable_requires_backend(self):
+    def test_ai_rejects_backend_argument(self):
         with tempfile.TemporaryDirectory() as d:
-            r = self.run_cli("ai", "enable",
-                             env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
-            self.assertNotEqual(r.returncode, 0)
-
-    def test_agentic_codex_backend_is_rejected(self):
-        with tempfile.TemporaryDirectory() as d:
-            r = self.run_cli("ai", "enable", "codex",
+            r = self.run_cli("ai", "enable", "claude",
                              env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
             self.assertNotEqual(r.returncode, 0)
 
@@ -527,11 +548,11 @@ class ExtractionTest(unittest.TestCase):
             self.e.which = original_which
         self.assertIsNone(backend)
 
-    def test_claude_backend_disables_every_tool_and_customization(self):
+    def test_grok_backend_disables_tools_web_and_subagents(self):
         calls = []
         original_run = self.e.subprocess.run
         original_which = self.e.which
-        self.e.which = lambda name: "/usr/bin/claude" if name == "claude" else None
+        self.e.which = lambda name: "/usr/bin/grok" if name == "grok" else None
 
         def fake_run(command, **kwargs):
             calls.append((command, kwargs))
@@ -539,22 +560,21 @@ class ExtractionTest(unittest.TestCase):
 
         self.e.subprocess.run = fake_run
         try:
-            ok, _ = self.e.call_llm("untrusted transcript", "claude")
+            ok, _ = self.e.call_llm("untrusted transcript", "omarchy:grok")
         finally:
             self.e.subprocess.run = original_run
             self.e.which = original_which
         self.assertTrue(ok)
         command = calls[0][0]
-        self.assertIn("--tools", command)
-        self.assertEqual(command[command.index("--tools") + 1], "")
-        self.assertIn("--disable-slash-commands", command)
-        self.assertIn("--strict-mcp-config", command)
-        self.assertIn("--no-session-persistence", command)
+        self.assertIn("--deny", command)
+        self.assertEqual(command[command.index("--deny") + 1], "*")
+        self.assertIn("--no-subagents", command)
+        self.assertIn("--disable-web-search", command)
+        self.assertEqual(command[command.index("--max-turns") + 1], "1")
+        self.assertNotIn("--model", command)
 
-    def test_endpoint_forbids_tools(self):
+    def test_transcript_prompt_marks_input_as_untrusted(self):
         source = (QML_DIR / "lib" / "extract.py").read_text()
-        self.assertIn('"tools": []', source)
-        self.assertIn('"tool_choice": "none"', source)
         self.assertIn("untrusted data", source)
 
     def test_parses_fenced_json(self):
