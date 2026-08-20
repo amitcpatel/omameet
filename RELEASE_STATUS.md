@@ -1,8 +1,8 @@
-# OmaScribe 0.5.0 release status
+# OmaScribe 0.5.1 release status
 
 ## Product direction
 
-OmaScribe 0.5.0 is the personal-first, opinionated Omarchy meeting assistant:
+OmaScribe 0.5.1 is the personal-first, opinionated Omarchy meeting assistant:
 
 - Google Calendar through the user's GCP OAuth project.
 - Scheduled and ad-hoc recording from the shell panel.
@@ -26,6 +26,10 @@ OmaScribe 0.5.0 is the personal-first, opinionated Omarchy meeting assistant:
 - Rejected private/local calendar feed hosts and cross-origin redirects.
 - Pinned the two supported Whisper model artifacts to an immutable upstream
   revision and verify their published SHA-256 values before use.
+- Bound remote iCalendar connections to the exact public IP validated for each
+  request while retaining TLS verification for the source hostname.
+- Hash-verify the exact allowlisted model before every normal transcription and
+  reject arbitrary fallback GGML files.
 - Marked transcripts and meeting metadata as untrusted data in every AI pass.
 - Fixed lookalike meeting-domain acceptance and model-name path traversal.
 - Removed stale persistent timer units from the development machine; runtime
@@ -43,6 +47,6 @@ omarchy plugin validate .
 git diff --check
 ```
 
-The renamed marketplace submission and a `v0.5.0` tag must reference the same
+The marketplace submission and a `v0.5.1` tag must reference the same
 validated commit. Earlier OmaMeet tags remain historical and are not marketplace
 submission candidates.

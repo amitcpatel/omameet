@@ -15,6 +15,8 @@ import subprocess
 import wave
 from pathlib import Path
 
+from model_integrity import WHISPER_MODEL_ARTIFACTS, verified_model
+
 WHISPER_BINS = ("whisper-cli", "whisper-cpp", "main")
 MODEL_DIRS = (
     Path("/usr/share/whisper.cpp/models"),
@@ -36,19 +38,8 @@ def whisper_bin() -> str | None:
 
 
 def find_model(name: str) -> Path | None:
-    """Locate a ggml model file for the requested size."""
-    stems = [f"ggml-{name}.bin", f"ggml-{name}.en.bin", f"{name}.bin"]
-    for directory in MODEL_DIRS:
-        if not directory.is_dir():
-            continue
-        for stem in stems:
-            candidate = directory / stem
-            if candidate.exists():
-                return candidate
-        # fall back to any ggml model present
-        for candidate in sorted(directory.glob("ggml-*.bin")):
-            return candidate
-    return None
+    """Locate and hash-verify the exact allowlisted model requested."""
+    return verified_model(name, MODEL_DIRS)
 
 
 def to_wav16k(src: Path, dst: Path) -> bool:
@@ -86,8 +77,10 @@ def transcribe(audio: Path, workdir: Path, model_name: str = "large-v3-turbo",
         return {"ok": False, "error": "whisper.cpp not installed", "segments": []}
     model = find_model(model_name)
     if not model:
+        reason = ("unsupported model" if model_name not in WHISPER_MODEL_ARTIFACTS
+                  else "model missing or failed SHA-256 verification")
         return {"ok": False,
-                "error": f"no ggml model found for '{model_name}'; "
+                "error": f"{reason} for '{model_name}'; "
                          f"fetch one into {MODEL_DIRS[1]}",
                 "segments": []}
 

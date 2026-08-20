@@ -368,7 +368,7 @@ class CliTest(unittest.TestCase):
         r = self.run_cli("version", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["name"], "omascribe")
-        self.assertEqual(json.loads(r.stdout)["version"], "0.5.0")
+        self.assertEqual(json.loads(r.stdout)["version"], "0.5.1")
 
     def test_fetch_model_rejects_path_traversal(self):
         r = self.run_cli("fetch-model", "../evil", "--json")
@@ -731,6 +731,48 @@ class ExtractionTest(unittest.TestCase):
             self.e.call_llm = original
         self.assertTrue(notes.startswith("## Notes"))
         self.assertIn("- [ ] Amit → Send the report 📅 2026-08-21", notes)
+
+
+class ModelIntegrityTest(unittest.TestCase):
+    def setUp(self):
+        sys.path.insert(0, str(QML_DIR / "lib"))
+        import model_integrity
+        import transcribe
+        self.integrity = model_integrity
+        self.transcribe = transcribe
+
+    def test_normal_transcription_accepts_only_hash_verified_exact_model(self):
+        payload = b"reviewed model bytes"
+        digest = __import__("hashlib").sha256(payload).hexdigest()
+        with tempfile.TemporaryDirectory() as directory:
+            model_dir = Path(directory)
+            expected = model_dir / "ggml-test.bin"
+            expected.write_bytes(payload)
+            fallback = model_dir / "ggml-other.bin"
+            fallback.write_bytes(payload)
+            with patch.object(self.integrity, "WHISPER_MODEL_ARTIFACTS", {"test": digest}), \
+                    patch.object(self.transcribe, "WHISPER_MODEL_ARTIFACTS", {"test": digest}), \
+                    patch.object(self.transcribe, "MODEL_DIRS", (model_dir,)):
+                self.assertEqual(expected, self.transcribe.find_model("test"))
+                expected.write_bytes(b"tampered")
+                self.assertIsNone(self.transcribe.find_model("test"))
+                self.assertIsNone(self.transcribe.find_model("other"))
+
+    def test_tampered_model_never_reaches_whisper_process(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / "ggml-test.bin"
+            model.write_bytes(b"tampered")
+            with patch.object(self.integrity, "WHISPER_MODEL_ARTIFACTS", {
+                        "test": __import__("hashlib").sha256(b"expected").hexdigest()}), \
+                    patch.object(self.transcribe, "WHISPER_MODEL_ARTIFACTS", {"test": "expected"}), \
+                    patch.object(self.transcribe, "MODEL_DIRS", (root, root)), \
+                    patch.object(self.transcribe, "whisper_bin", return_value="whisper-cli"), \
+                    patch.object(self.transcribe.subprocess, "run") as run:
+                result = self.transcribe.transcribe(root / "audio.opus", root, "test")
+            self.assertFalse(result["ok"])
+            self.assertIn("SHA-256", result["error"])
+            run.assert_not_called()
 
 
 class SpeakerResolutionTest(unittest.TestCase):

@@ -36,7 +36,7 @@ omarchy-default-agent
 omascribe-meetings ai status --json
 ```
 
-Version 0.5.0 supports Grok. An unsupported or unavailable selected agent fails
+Version 0.5.1 supports Grok. An unsupported or unavailable selected agent fails
 closed; local transcription still runs, and basic notes are written.
 
 ## Recording captured silence

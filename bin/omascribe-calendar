@@ -7,6 +7,7 @@ import argparse
 import base64
 import calendar as month_calendar
 import hashlib
+import http.client
 import http.server
 import ipaddress
 import json
@@ -15,6 +16,7 @@ import re
 import secrets
 import subprocess
 import socket
+import ssl
 import sys
 import urllib.parse
 import urllib.request
@@ -40,14 +42,14 @@ URL_RE = re.compile(r"https://(?:meet\.google\.com|(?:[\w-]+\.)*zoom\.us|teams\.
 PRIORITIES = ("family", "work", "normal", "informational")
 
 
-def validate_remote_calendar_url(url: str) -> urllib.parse.ParseResult:
-    """Allow public HTTPS calendar endpoints only."""
+def resolve_public_https_url(url: str) -> tuple[urllib.parse.ParseResult, tuple[str, ...]]:
+    """Validate an HTTPS URL and return the public addresses it may use."""
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname:
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("calendar subscriptions must use a public https URL")
     try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(
-            parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)}
+        addresses = sorted({item[4][0] for item in socket.getaddrinfo(
+            parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)})
     except socket.gaierror as exc:
         raise ValueError("calendar subscription host could not be resolved") from exc
     for value in addresses:
@@ -55,18 +57,60 @@ def validate_remote_calendar_url(url: str) -> urllib.parse.ParseResult:
         if (address.is_private or address.is_loopback or address.is_link_local
                 or address.is_reserved or address.is_multicast or address.is_unspecified):
             raise ValueError("calendar subscriptions cannot use private or local hosts")
-    return parsed
+    if not addresses:
+        raise ValueError("calendar subscription host could not be resolved")
+    return parsed, tuple(addresses)
 
 
-class SameOriginHttpsRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Reject redirects that change scheme or origin."""
+def validate_remote_calendar_url(url: str) -> urllib.parse.ParseResult:
+    """Compatibility wrapper for callers that need URL validation only."""
+    return resolve_public_https_url(url)[0]
 
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        old = urllib.parse.urlparse(req.full_url)
-        new = validate_remote_calendar_url(newurl)
-        if new.scheme != old.scheme or new.hostname != old.hostname or new.port != old.port:
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to a validated IP while verifying TLS for the original host."""
+
+    def __init__(self, host: str, port: int, pinned_ip: str, *, timeout: int = 20):
+        super().__init__(host, port=port, timeout=timeout,
+                         context=ssl.create_default_context())
+        self.pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection(
+            (self.pinned_ip, self.port), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+def fetch_public_https(url: str, headers: dict[str, str], *, max_redirects: int = 5) -> bytes:
+    """Fetch from the exact public address validated for each HTTPS hop."""
+    original = urllib.parse.urlparse(url)
+    current = url
+    for redirect_count in range(max_redirects + 1):
+        parsed, addresses = resolve_public_https_url(current)
+        if (parsed.scheme, parsed.hostname, parsed.port or 443) != (
+                original.scheme, original.hostname, original.port or 443):
             raise ValueError("calendar feed redirect changed origin")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        connection = PinnedHTTPSConnection(
+            parsed.hostname, parsed.port or 443, addresses[0], timeout=20)
+        path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+        try:
+            connection.request("GET", path, headers=headers)
+            response = connection.getresponse()
+            if response.status in (301, 302, 303, 307, 308):
+                location = response.getheader("Location")
+                if not location or redirect_count >= max_redirects:
+                    raise ValueError("calendar feed redirect limit exceeded")
+                current = urllib.parse.urljoin(current, location)
+                continue
+            if response.status < 200 or response.status >= 300:
+                raise ValueError(f"calendar feed returned HTTP {response.status}")
+            data = response.read(10 * 1024 * 1024 + 1)
+            if len(data) > 10 * 1024 * 1024:
+                raise ValueError("iCalendar feed exceeds 10 MB")
+            return data
+        finally:
+            connection.close()
+    raise ValueError("calendar feed redirect limit exceeded")
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -131,16 +175,10 @@ def read_ical_source(feed: dict) -> str:
         path = Path(urllib.request.url2pathname(parsed.path))
         data = path.read_bytes()
     else:
-        validate_remote_calendar_url(source)
-        request = urllib.request.Request(source, headers={
+        data = fetch_public_https(source, {
             "Accept": "text/calendar, text/plain;q=0.9, */*;q=0.1",
             "User-Agent": "OmaScribe/0.5",
         })
-        opener = urllib.request.build_opener(SameOriginHttpsRedirectHandler())
-        with opener.open(request, timeout=20) as response:
-            data = response.read(10 * 1024 * 1024 + 1)
-        if len(data) > 10 * 1024 * 1024:
-            raise ValueError("iCalendar feed exceeds 10 MB")
     text = data.decode("utf-8-sig", errors="replace")
     if "BEGIN:VCALENDAR" not in text.upper():
         raise ValueError("source is not an iCalendar feed")

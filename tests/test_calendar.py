@@ -127,16 +127,86 @@ END:VCALENDAR
             with self.assertRaisesRegex(ValueError, "private or local"):
                 calendar.validate_remote_calendar_url(url)
 
+    def test_feed_fetch_connects_to_the_exact_validated_ip(self):
+        calendar = load_module()
+        raw_socket = object()
+        wrapped_socket = object()
+        tls_hosts = []
+
+        class Context:
+            def wrap_socket(self, sock, *, server_hostname):
+                if sock is not raw_socket:
+                    raise AssertionError("TLS did not wrap the pinned socket")
+                tls_hosts.append(server_hostname)
+                return wrapped_socket
+
+        connection = calendar.PinnedHTTPSConnection(
+            "calendar.example", 443, "93.184.216.34")
+        connection._context = Context()
+        with patch.object(calendar.socket, "create_connection", return_value=raw_socket) as connect:
+            connection.connect()
+
+        connect.assert_called_once_with(("93.184.216.34", 443), 20, None)
+        self.assertIs(connection.sock, wrapped_socket)
+        self.assertEqual(tls_hosts, ["calendar.example"])
+
     def test_feed_redirect_cannot_change_origin(self):
         calendar = load_module()
-        handler = calendar.SameOriginHttpsRedirectHandler()
-        request = calendar.urllib.request.Request("https://calendar.example/feed.ics")
-        public = [(calendar.socket.AF_INET, calendar.socket.SOCK_STREAM, 6, "",
-                   ("93.184.216.34", 443))]
-        with patch.object(calendar.socket, "getaddrinfo", return_value=public):
+
+        class Response:
+            status = 302
+            def getheader(self, _name):
+                return "https://attacker.example/feed.ics"
+
+        class Connection:
+            def request(self, *_args, **_kwargs):
+                pass
+            def getresponse(self):
+                return Response()
+            def close(self):
+                pass
+
+        def resolve(url):
+            return calendar.urllib.parse.urlparse(url), ("93.184.216.34",)
+
+        with patch.object(calendar, "resolve_public_https_url", side_effect=resolve), \
+                patch.object(calendar, "PinnedHTTPSConnection", return_value=Connection()):
             with self.assertRaisesRegex(ValueError, "changed origin"):
-                handler.redirect_request(
-                    request, None, 302, "Found", {}, "https://attacker.example/feed.ics")
+                calendar.fetch_public_https("https://calendar.example/feed.ics", {})
+
+    def test_feed_fetch_passes_resolved_ip_to_pinned_connection(self):
+        calendar = load_module()
+        calls = []
+
+        class Response:
+            status = 200
+            def getheader(self, _name):
+                return None
+            def read(self, _limit):
+                return b"BEGIN:VCALENDAR\nEND:VCALENDAR\n"
+
+        class Connection:
+            def request(self, method, path, headers):
+                calls.append((method, path, headers))
+            def getresponse(self):
+                return Response()
+            def close(self):
+                pass
+
+        def factory(host, port, pinned_ip, *, timeout):
+            calls.append((host, port, pinned_ip, timeout))
+            return Connection()
+
+        resolved = (calendar.urllib.parse.urlparse(
+            "https://calendar.example/feed.ics?private=1"), ("93.184.216.34",))
+        with patch.object(calendar, "resolve_public_https_url", return_value=resolved), \
+                patch.object(calendar, "PinnedHTTPSConnection", side_effect=factory):
+            data = calendar.fetch_public_https(
+                "https://calendar.example/feed.ics?private=1", {"Accept": "text/calendar"})
+
+        self.assertTrue(data.startswith(b"BEGIN:VCALENDAR"))
+        self.assertEqual(calls[0], ("calendar.example", 443, "93.184.216.34", 20))
+        self.assertEqual(calls[1][0:2], ("GET", "/feed.ics?private=1"))
 
     def test_feed_preferences_are_stored_with_private_permissions(self):
         calendar = load_module()

@@ -58,12 +58,19 @@ anchored Google Meet, Zoom, Microsoft Teams, and Webex hosts; lookalike domains
 are rejected. External links are passed to `xdg-open` as argument arrays, not
 through a shell command.
 
+Optional remote iCalendar feeds must use HTTPS. For every request and redirect,
+OmaScribe rejects non-public resolved addresses, connects directly to the exact
+public address it validated, and still verifies TLS against the calendar host.
+Redirects that change the scheme, host, or effective port are rejected.
+
 ## Model supply chain
 
 `fetch-model` accepts only `base.en` and `large-v3-turbo`, downloads from the
 immutable whisper.cpp model revision recorded in the source, and verifies the
 artifact's published SHA-256 before moving it into the model directory. Existing
 cached models must also match the allowlisted digest before they are accepted.
+Normal transcription performs the same verification immediately before use and
+does not fall back to another model file.
 
 ## Deletion and uninstall
 

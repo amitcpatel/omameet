@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "acp.omascribe",
   "name": "OmaScribe — AI Meeting Notes",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "author": "Amit Patel",
   "license": "MIT",
   "description": "An opinionated Google Calendar day planner with local transcription and AI-optimized meeting notes.",

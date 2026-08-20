@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import argparse
 import fcntl
-import hashlib
 import json
 import os
 import re
@@ -30,24 +29,15 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omascribe"
-VERSION = "0.5.0"
-
-WHISPER_MODEL_REVISION = "5359861c739e955e79d9a303bcbc70fb988958b1"
-WHISPER_MODEL_ARTIFACTS = {
-    "base.en": "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002",
-    "large-v3-turbo": "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69",
-}
-
-
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+VERSION = "0.5.1"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
+from model_integrity import (  # noqa: E402
+    WHISPER_MODEL_ARTIFACTS,
+    WHISPER_MODEL_REVISION,
+    file_sha256,
+)
 
 
 def launch_processing(recording_dir: str) -> None:

@@ -24,13 +24,18 @@ the UI does not depend on an installation hook or the user's `PATH`.
 9. Source audio is removed only after the pipeline reports complete success,
    unless `retainAudio` is enabled.
 
+Optional HTTPS iCalendar feeds use address-pinned connections: each hop resolves
+to public addresses, the socket connects to the selected validated address, TLS
+verifies the URL hostname, and redirects may not change origin.
+
 ## AI resolution
 
 The default backend is `disabled`. Enabling AI in OmaScribe Settings persists the
 user's OmaScribe-specific consent by selecting `omarchy`, not a hard-coded model.
-At processing time OmaScribe runs `omarchy-default-agent`. Version 0.5.0 supports Grok and deliberately
-fails closed for unsupported agents. Grok is invoked for a single turn with
-tools denied, web search disabled, subagents disabled, and no model override.
+At processing time OmaScribe runs `omarchy-default-agent`. Version 0.5.1
+supports Grok and deliberately fails closed for unsupported agents. Grok is
+invoked for a single turn with tools denied, web search disabled, subagents
+disabled, and no model override.
 The prompt travels in a private temporary file, never in argv. The call uses an
 ephemeral working directory whose local Grok session bucket is deleted afterward.
 

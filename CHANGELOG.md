@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 — bind network and model validation to consumption
+
+- Eliminate iCalendar DNS-rebinding exposure by connecting to the exact public
+  IP address validated for each request and same-origin redirect while retaining
+  TLS certificate and hostname verification.
+- Require every model used by normal transcription to match the shared
+  allowlisted SHA-256 digest; remove arbitrary GGML fallback selection.
+- Add behavioral regressions proving the validated IP reaches the socket and a
+  tampered or unrequested model never reaches the Whisper process.
+
 ## 0.5.0 — renamed to OmaScribe
 
 - Rename the product, plugin ID, repository, commands, runtime namespaces, UI,
