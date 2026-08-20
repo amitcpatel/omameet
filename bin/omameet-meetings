@@ -1223,7 +1223,7 @@ def cmd_fetch_model(args) -> None:
     import urllib.request
     name = args.model
     if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
-        fail("invalid model name")
+        fail("invalid model name", notify_user=False)
     dest_dir = Path.home() / ".local/share/whisper.cpp/models"
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest = dest_dir / f"ggml-{name}.bin"

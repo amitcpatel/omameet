@@ -369,6 +369,11 @@ class CliTest(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("invalid model name", r.stderr)
 
+    def test_invalid_model_name_does_not_raise_desktop_notification(self):
+        source = HELPER.read_text()
+        branch = source.split('if not re.fullmatch(r"[A-Za-z0-9._-]+", name):', 1)[1].split("\n", 2)[0:2]
+        self.assertIn("notify_user=False", "\n".join(branch))
+
     def test_status_json_is_parseable(self):
         with tempfile.TemporaryDirectory() as d:
             r = self.run_cli("status", "--json", env={"XDG_STATE_HOME": d})
