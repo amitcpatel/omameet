@@ -8,6 +8,6 @@ installed_dir="${HOME}/.config/omarchy/plugins/acp.omameet"
 if [[ "${plugin_dir}" != "${installed_dir}" ]]; then
   omarchy plugin add "${plugin_dir}" --enable --yes
 else
-  omarchy plugin enable acp.omameet --yes
+  omarchy plugin enable acp.omameet
 fi
-echo "OmaMeet is ready. Open the bar icon, then right-click it to add a calendar."
+echo "OmaMeet is ready. Open the bar icon, then use the gear to connect Google Calendar."

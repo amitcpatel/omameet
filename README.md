@@ -22,9 +22,22 @@ event to open its meeting link and start capture, or use the clearly labelled
 **Record** button for an ad-hoc conversation. **Stop** ends capture and starts
 local transcription and note processing.
 
-Right-click the bar icon, or click the gear in the calendar panel, to open
-OmaMeet Settings. From there you can connect Google, select visible calendars,
-set calendar priority, and turn AI optimization on or off.
+Click the gear in the calendar panel to open OmaMeet Settings. From there you
+can connect Google, select visible calendars, set calendar priority, and turn AI
+optimization on or off. Hovering over the bar icon shows the next meeting, or
+`No events` when the day is clear.
+
+## Install and update
+
+```bash
+omarchy plugin add https://github.com/amitcpatel/omameet.git --enable --yes
+omarchy plugin update acp.omameet --yes
+```
+
+Omarchy intentionally does not run plugin install hooks. The shell UI and its
+bundled helpers work immediately because QML resolves them inside the plugin
+directory. To also install the optional `omameet-calendar` and
+`omameet-meetings` command links, run `./install.sh` from the cloned plugin.
 
 ## Google Calendar setup
 
@@ -72,6 +85,22 @@ omameet-meetings status --json
 omameet-meetings doctor
 omameet-meetings config
 ```
+
+If the optional CLI links were not installed, run the helper from the plugin:
+
+```bash
+~/.config/omarchy/plugins/acp.omameet/bin/omameet-meetings doctor
+```
+
+## Documentation
+
+- [Architecture and processing lifecycle](docs/ARCHITECTURE.md)
+- [Configuration and command reference](docs/CONFIGURATION.md)
+- [Privacy and security boundaries](docs/PRIVACY.md)
+- [Troubleshooting and recovery](docs/TROUBLESHOOTING.md)
+- [Release history](CHANGELOG.md)
+- [0.4.0 release gate](RELEASE_STATUS.md)
+- [Independent review record](REVIEW_FINDINGS.md)
 
 ## Development status
 

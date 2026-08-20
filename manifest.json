@@ -5,7 +5,7 @@
   "version": "0.4.0",
   "author": "Amit Patel",
   "license": "MIT",
-  "description": "A private day planner with one-click joining and AI-generated meeting notes.",
+  "description": "An opinionated Google Calendar day planner with local transcription and AI-optimized meeting notes.",
   "kinds": [
     "bar-widget",
     "service"
@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "OmaMeet",
-    "description": "Calendar, meeting capture, transcripts, and AI-generated notes",
+    "description": "Google Calendar, meeting capture, local transcripts, and AI-optimized notes",
     "category": "Productivity",
     "aliases": [
       "calendar",
