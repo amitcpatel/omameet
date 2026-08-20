@@ -7,9 +7,9 @@ Last updated: 2026-08-19
 - Product: **OmaMeet — AI Meeting Notes** (`acp.omameet`)
 - Repository: <https://github.com/amitcpatel/omameet>
 - Marketplace submission: <https://github.com/HANCORE-linux/omarchy-plugin-marketplace/issues/788>
-- Submission state: open, structurally validated, awaiting requested privacy fix
-- Current public release before this change: `v0.3.3` at `825ba22`
-- Prepared security release: `v0.3.4`
+- Submission state: open, structurally validated, awaiting requested QML hardening fix
+- Current public release before this change: `v0.3.4` at `adac6f7`
+- Prepared security release: `v0.3.5`
 
 Do not open another marketplace submission. Continue with issue #788.
 
@@ -33,29 +33,36 @@ addresses this by:
 - adding regression tests proving installed CLIs are not implicit consent and
   the disabled path never calls an AI backend.
 
-## Verification
-
 The third finding was that transcript prompt injection could drive tools exposed
 by the Codex or Claude agent CLIs. Version 0.3.4 removes the Codex CLI backend
 because it has no tool-free execution mode, invokes Claude with an empty tool
 set and all customization/MCP surfaces disabled, and requires HTTP endpoints to
 honor `tool_choice: none` with no declared tools.
 
-For v0.3.4:
+The fourth finding was that calendar-controlled strings were rendered with
+QML's automatic text-format detection. Version 0.3.5 forces event titles,
+calendar/account labels, and externally derived errors through
+`Text.PlainText`. It adds a dedicated plain-text toggle for the shared control
+that does not expose `textFormat`, and sanitizes calendar-derived bar tooltips
+before they cross into the shared tooltip component.
+
+## Verification
+
+For v0.3.5:
 
 - `omarchy plugin validate .` passes;
-- all 104 unit and contract tests pass;
+- all 106 unit and contract tests pass;
 - Python source compiles;
 - installer and removal scripts pass `bash -n`;
 - `git diff --check` passes.
 
-`qmllint` is not installed on the development machine. No QML files changed in
-v0.3.4.
+`qmllint` is not installed on the development machine. The changed QML is also
+loaded in the running Omarchy Shell and checked for plugin-specific warnings.
 
 ## Remaining marketplace review
 
-After v0.3.4 is published, edit and comment on issue #788 to re-run validation.
-Confirm that validation reports v0.3.4 and the new commit. The deterministic
+After v0.3.5 is published, edit and comment on issue #788 to re-run validation.
+Confirm that validation reports v0.3.5 and the new commit. The deterministic
 security baseline may continue to request manual review for the optional setup
 scripts and transient `systemd-run --user` processing job; that flag is expected
 and is not itself a new defect.

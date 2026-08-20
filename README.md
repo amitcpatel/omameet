@@ -209,5 +209,5 @@ qmllint -I "$OMARCHY_PATH/shell" BarWidget.qml Panel.qml Service.qml
 python3 -m unittest discover -s tests -v
 ```
 
-OmaMeet is MIT licensed. Version 0.3.4 requires an OmaMeet-specific opt-in before
+OmaMeet is MIT licensed. Version 0.3.5 requires an OmaMeet-specific opt-in before
 any AI backend can receive transcript text.

@@ -38,7 +38,10 @@ Panel {
   readonly property color accent: Color.accent
   readonly property color urgent: Color.urgent
   readonly property int refreshIntervalSec: Math.max(60, Number(settings.refreshIntervalSec || 300))
-  readonly property string tooltip: recording ? ("Recording — " + recordingTitle) : nextEventText()
+  // Bar tooltips are rendered by a shared component that does not expose a
+  // textFormat property. Remove rich-text delimiters before crossing it.
+  function safeTooltipText(value) { return String(value || "").replace(/</g, "‹").replace(/>/g, "›") }
+  readonly property string tooltip: safeTooltipText(recording ? ("Recording — " + recordingTitle) : nextEventText())
   readonly property int startHour: 7
   readonly property int endHour: 19
   readonly property int hourHeight: Style.space(64)
@@ -409,11 +412,11 @@ Panel {
                 anchors.leftMargin: Style.spacing.panelPadding
                 anchors.rightMargin: Style.spacing.panelPadding
                 spacing: Style.spacing.sm
-                Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - showAll.width - hideAll.width - parent.spacing * 2; text: modelData.accountLabel; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true; elide: Text.ElideRight }
+                Text { anchors.verticalCenter: parent.verticalCenter; width: parent.width - showAll.width - hideAll.width - parent.spacing * 2; text: modelData.accountLabel; textFormat: Text.PlainText; color: root.foreground; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: true; elide: Text.ElideRight }
                 Button { id: showAll; anchors.verticalCenter: parent.verticalCenter; text: "Show all"; foreground: root.foreground; accent: root.accent; onClicked: root.setAccountVisible(modelData.accountId, true) }
                 Button { id: hideAll; anchors.verticalCenter: parent.verticalCenter; text: "Hide all"; foreground: root.foreground; accent: root.accent; onClicked: root.setAccountVisible(modelData.accountId, false) }
               }
-              Toggle {
+              PlainTextToggle {
                 anchors.left: parent.left
                 anchors.right: priorityButton.left
                 anchors.leftMargin: Style.spacing.panelPadding
@@ -453,7 +456,7 @@ Panel {
             visible: root.errorText !== ""
             width: parent.width
             height: visible ? errorLabel.implicitHeight + Style.spacing.xxl * 2 : 0
-            Text { id: errorLabel; anchors.left: parent.left; anchors.right: parent.right; anchors.margins: Style.spacing.panelPadding; anchors.verticalCenter: parent.verticalCenter; text: root.errorText; color: root.urgent; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.Wrap }
+            Text { id: errorLabel; anchors.left: parent.left; anchors.right: parent.right; anchors.margins: Style.spacing.panelPadding; anchors.verticalCenter: parent.verticalCenter; text: root.errorText; textFormat: Text.PlainText; color: root.urgent; font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; wrapMode: Text.Wrap }
           }
 
           Column {
@@ -473,7 +476,7 @@ Panel {
                 radius: Style.cornerRadius
                 color: root.eventFill(modelData)
                 Rectangle { width: Style.space(3); height: parent.height; color: root.eventMarker(modelData); radius: width / 2 }
-                Text { anchors.left: parent.left; anchors.leftMargin: Style.spacing.xl; anchors.right: parent.right; anchors.rightMargin: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter; text: modelData.title + "  ·  " + modelData.calendarLabel; color: root.eventText(modelData); font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+                Text { anchors.left: parent.left; anchors.leftMargin: Style.spacing.xl; anchors.right: parent.right; anchors.rightMargin: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter; text: modelData.title + "  ·  " + modelData.calendarLabel; textFormat: Text.PlainText; color: root.eventText(modelData); font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
                 TapHandler { onTapped: root.openUrl(modelData.htmlLink) }
               }
             }
@@ -535,8 +538,8 @@ Panel {
                   anchors.rightMargin: joinButton.visible ? joinButton.width + Style.spacing.sm : Style.spacing.md
                   anchors.topMargin: Style.spacing.sm
                   clip: true
-                  Text { width: parent.width; text: modelData.title; color: root.eventText(modelData); font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: !root.eventEnded(modelData) && (modelData.priority === "family" || modelData.priority === "work"); elide: Text.ElideRight }
-                  Text { width: parent.width; visible: parent.parent.height >= Style.space(44); text: root.timeRange(modelData) + "  ·  " + modelData.calendarLabel; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
+                  Text { width: parent.width; text: modelData.title; textFormat: Text.PlainText; color: root.eventText(modelData); font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; font.bold: !root.eventEnded(modelData) && (modelData.priority === "family" || modelData.priority === "work"); elide: Text.ElideRight }
+                  Text { width: parent.width; visible: parent.parent.height >= Style.space(44); text: root.timeRange(modelData) + "  ·  " + modelData.calendarLabel; textFormat: Text.PlainText; color: root.muted; font.family: Style.font.family; font.pixelSize: Style.font.caption; elide: Text.ElideRight }
                 }
                 Button { id: joinButton; visible: !!modelData.joinUrl && !root.eventEnded(modelData); anchors.right: parent.right; anchors.rightMargin: Style.spacing.xs; anchors.verticalCenter: parent.verticalCenter; text: root.recording ? "Recording" : "Join"; foreground: root.foreground; accent: root.accent; selected: root.recording; enabled: !joinProcess.running && !root.recording; onClicked: root.joinMeeting(modelData) }
                 HoverHandler { id: eventHover }
@@ -579,7 +582,7 @@ Panel {
         radius: Style.cornerRadius
         color: root.eventFill(modelData)
         Rectangle { width: Style.space(3); height: parent.height; radius: width / 2; color: root.eventMarker(modelData) }
-        Text { anchors.left: parent.left; anchors.leftMargin: Style.spacing.xl; anchors.right: parent.right; anchors.rightMargin: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter; text: root.timeRange(modelData) + "  " + modelData.title; color: root.eventText(modelData); font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
+        Text { anchors.left: parent.left; anchors.leftMargin: Style.spacing.xl; anchors.right: parent.right; anchors.rightMargin: Style.spacing.md; anchors.verticalCenter: parent.verticalCenter; text: root.timeRange(modelData) + "  " + modelData.title; textFormat: Text.PlainText; color: root.eventText(modelData); font.family: Style.font.family; font.pixelSize: Style.font.bodySmall; elide: Text.ElideRight }
         TapHandler { onTapped: root.openUrl(modelData.htmlLink) }
       }
     }

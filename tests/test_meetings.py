@@ -128,6 +128,31 @@ class ThemeComplianceTest(unittest.TestCase):
         self.assertIn('meetingsHelper, "join"', source)
         self.assertIn('onClicked: root.joinMeeting(modelData)', source)
 
+    def test_calendar_controlled_text_is_always_plain_text(self):
+        """Calendar HTML must never be interpreted inside omarchy-shell."""
+        panel = (QML_DIR / "Panel.qml").read_text()
+        external_bindings = (
+            "text: modelData.accountLabel",
+            'text: modelData.title + "  ·  " + modelData.calendarLabel',
+            "text: modelData.title",
+            'text: root.timeRange(modelData) + "  ·  " + modelData.calendarLabel',
+            'text: root.timeRange(modelData) + "  " + modelData.title',
+            "text: root.errorText",
+        )
+        for binding in external_bindings:
+            line = next((line for line in panel.splitlines() if binding in line), "")
+            self.assertIn("textFormat: Text.PlainText", line,
+                          f"untrusted QML binding lacks PlainText: {binding}")
+
+        toggle = (QML_DIR / "PlainTextToggle.qml").read_text()
+        self.assertGreaterEqual(toggle.count("textFormat: Text.PlainText"), 2)
+        self.assertIn("PlainTextToggle {", panel)
+
+    def test_calendar_titles_are_sanitized_before_shared_tooltip(self):
+        panel = (QML_DIR / "Panel.qml").read_text()
+        self.assertIn("function safeTooltipText(value)", panel)
+        self.assertRegex(panel, r"readonly property string tooltip:\s*safeTooltipText\(")
+
 
 class UrlInstallTest(unittest.TestCase):
     """`omarchy plugin add <git-url>` runs NO install hooks.

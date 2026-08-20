@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omarchy-meetings"
-VERSION = "0.3.4"
+VERSION = "0.3.5"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
