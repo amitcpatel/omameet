@@ -103,6 +103,7 @@ def write_meeting(vault: Path, meeting: dict, participants: list[dict],
         "uncertain": extracted.get("uncertain", []),
         "followups": build_followups(extracted, meeting),
         "llm": extracted.get("llm", {}),
+        "notes": extracted.get("notes", {}),
         "passes": extracted.get("passes", {}),
         "audio": {
             "deleted": False,
@@ -127,11 +128,14 @@ def write_meeting(vault: Path, meeting: dict, participants: list[dict],
     # Extraction must ALSO have succeeded, or the audio stays so the meeting
     # can be reprocessed once the LLM is available again.
     extraction_ok = not extracted.get("error")
-    verified = written_ok and extraction_ok
+    notes_ok = extracted.get("notes", {}).get("ok", True) is True
+    verified = written_ok and extraction_ok and notes_ok
     contract["verification"] = {
         "files_written": written_ok,
         "extraction_ok": extraction_ok,
         "extraction_error": extracted.get("error"),
+        "notes_ok": notes_ok,
+        "notes_error": extracted.get("notes", {}).get("error"),
         "safe_to_delete_audio": verified,
     }
 
@@ -149,13 +153,16 @@ def write_meeting(vault: Path, meeting: dict, participants: list[dict],
 
     if not verified:
         contract["audio"]["retained_reason"] = (
-            extracted.get("error") or "output verification failed")
+            extracted.get("error") or extracted.get("notes", {}).get("error")
+            or "output verification failed")
     contract_path.write_text(json.dumps(contract, indent=2) + "\n")
     return {
         "ok": written_ok,
         "dir": str(folder),
         "verified": verified,
         "extraction_ok": extraction_ok,
+        "notes_ok": notes_ok,
+        "pipeline_ok": extraction_ok and notes_ok,
         "audio_deleted": deleted,
         "audio_retained": not deleted,
         "files": [p.name for p in (contract_path, notes_path, transcript_path)],

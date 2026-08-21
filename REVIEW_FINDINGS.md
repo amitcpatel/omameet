@@ -1,4 +1,4 @@
-# OmaScribe 0.5.2 review record
+# OmaScribe 0.5.3 review record
 
 This file carries forward the independent pre-submission review performed
 against 0.3.5 and records how its findings were handled through 0.4.2.
@@ -18,6 +18,7 @@ against 0.3.5 and records how its findings were handled through 0.4.2.
 | Optional installer overwrote existing command paths | Resolved in 0.4.2: both destinations are preflighted before mutation; regular files and foreign symlinks fail closed, while links already owned by the same checkout are preserved. |
 | Calendar-feed DNS validation was separate from consumption | Removed in 0.5.2 with the complete non-Google calendar-feed subsystem; no feed network path remains. |
 | Normal transcription accepted unverified or fallback models | Resolved in 0.5.1: fetch and transcription share one artifact allowlist; normal transcription hashes the exact requested model and rejects missing, tampered, unsupported, and fallback files before launching Whisper. |
+| Requested AI notes failure was reported as success | Resolved in 0.5.3: non-empty optimized notes are required for AI-enabled pipeline success; the exact backend error is persisted, processing exits nonzero with an urgent notification, audio is retained, and saved transcripts can be retried explicitly. |
 | Agent tools could process untrusted transcript instructions | Preserved: Grok remains constrained to one turn with tools denied, web search disabled, and subagents disabled. Every AI prompt labels meeting content as untrusted data. |
 
 ## Preserved safeguards
@@ -29,7 +30,7 @@ against 0.3.5 and records how its findings were handled through 0.4.2.
 - OAuth tokens remain in the system keyring and configuration/state files use
   private directories or explicit `0600` permissions where sensitive.
 
-## 0.5.2 review gate
+## 0.5.3 review gate
 
-All listed safeguards remain implemented. The exact 0.5.2 tagged commit must
+All listed safeguards remain implemented. The exact 0.5.3 tagged commit must
 pass marketplace validation and manual review before listing.

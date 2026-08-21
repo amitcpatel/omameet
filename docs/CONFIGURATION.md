@@ -47,6 +47,7 @@ Omarchy shell from `manifest.json`; they are separate from the meeting JSON.
 | `record start` | Start an ad-hoc recording |
 | `record stop` | Stop and launch processing |
 | `process DIR --json` | Process or retry a recording directory |
+| `regenerate-notes DIR --json` | Retry AI notes from a saved meeting transcript |
 | `ai status --json` | Show selected and resolved AI backend |
 | `ai enable` / `ai disable` | Toggle AI note optimization |
 | `pause` / `resume` | Pause or resume automatic detection |

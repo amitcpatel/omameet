@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omascribe"
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -875,8 +875,10 @@ def cmd_process(args) -> None:
     # 3. three-pass extraction
     selected_backend = cfg.get("llm", {}).get("backend", "disabled")
     extracted = E.extract(transcript_md, participants, meeting, selected_backend)
-    notes_body = E.write_notes(meeting, participants, extracted, transcript_md,
-                               selected_backend)
+    notes = E.generate_notes(meeting, participants, extracted, transcript_md,
+                             selected_backend)
+    extracted["notes"] = {key: value for key, value in notes.items() if key != "body"}
+    notes_body = notes["body"]
 
     # 4. write vault; audio deleted only after verification
     result = V.write_meeting(vault_dir(cfg), meeting, participants, conflicts,
@@ -899,6 +901,8 @@ def cmd_process(args) -> None:
     }
     payload["audio_retained"] = result["audio_retained"]
     payload["extraction_ok"] = result["extraction_ok"]
+    payload["notes_ok"] = result.get("notes_ok", True)
+    payload["notes_error"] = notes.get("error")
 
     if not result["extraction_ok"]:
         # Transcript and notes exist, but extraction failed. Audio is retained so
@@ -911,10 +915,80 @@ def cmd_process(args) -> None:
              f"{payload['extraction_error']}\n  audio retained for reprocessing")
         sys.exit(3)
 
+    if not result.get("notes_ok", True):
+        notify("Meeting partially processed",
+               f"{meeting['title']} — transcript saved, AI NOTES FAILED (audio retained)",
+               urgent=True)
+        emit(payload, args.json,
+             f"{result['dir']}\n  transcript written; AI NOTES FAILED: "
+             f"{payload['notes_error']}\n  audio retained for reprocessing")
+        sys.exit(4)
+
     notify("Meeting processed", f"{meeting['title']} — {payload['commitments']} commitments")
     emit(payload, args.json,
          f"{result['dir']}\n  {payload['commitments']} commitments, "
          f"{payload['decisions']} decisions, {payload['uncertain']} uncertain")
+
+
+def cmd_regenerate_notes(args) -> None:
+    """Retry AI notes from an existing saved transcript without source audio."""
+    import extract as E
+    import vault as V
+
+    cfg = config()
+    folder = Path(args.path).expanduser().resolve()
+    allowed_vault = vault_dir(cfg).resolve()
+    try:
+        folder.relative_to(allowed_vault)
+    except ValueError:
+        fail(f"meeting folder must be inside configured vault: {allowed_vault}",
+             notify_user=False)
+    contract_path = folder / "meeting.json"
+    transcript_path = folder / "transcript.md"
+    notes_path = folder / "notes.md"
+    if any(path.is_symlink() for path in (contract_path, transcript_path, notes_path)):
+        fail("meeting contract, transcript, and notes must not be symlinks",
+             notify_user=False)
+    contract = read_json(contract_path)
+    if not contract or not transcript_path.is_file():
+        fail("meeting folder must contain meeting.json and transcript.md", notify_user=False)
+    transcript_md = transcript_path.read_text()
+    if not transcript_md.strip():
+        fail("saved transcript is empty", notify_user=False)
+
+    selected_backend = cfg.get("llm", {}).get("backend", "disabled")
+    notes = E.generate_notes(contract.get("meeting", {}), contract.get("participants", []),
+                             contract, transcript_md, selected_backend)
+    contract["notes"] = {key: value for key, value in notes.items() if key != "body"}
+    verification = contract.setdefault("verification", {})
+    verification["notes_ok"] = notes["ok"]
+    verification["notes_error"] = notes.get("error")
+    verification["safe_to_delete_audio"] = (
+        verification.get("files_written", False)
+        and verification.get("extraction_ok", False)
+        and notes["ok"]
+    )
+
+    if notes["ok"]:
+        temporary_notes = notes_path.with_suffix(".tmp")
+        temporary_notes.write_text(
+            V.frontmatter(contract.get("meeting", {}), contract.get("participants", []),
+                          contract) + notes["body"])
+        temporary_notes.replace(notes_path)
+        contract["notes"]["regenerated_at"] = datetime.now().astimezone().isoformat()
+
+    temporary_contract = contract_path.with_suffix(".tmp")
+    temporary_contract.write_text(json.dumps(contract, indent=2) + "\n")
+    temporary_contract.replace(contract_path)
+
+    if not notes["ok"]:
+        notify("Meeting notes failed", f"{folder.name} — {notes['error']}", urgent=True)
+        emit({"ok": False, "dir": str(folder), "error": notes["error"]}, args.json,
+             f"AI notes failed: {notes['error']}")
+        sys.exit(4)
+    notify("Meeting notes regenerated", contract.get("meeting", {}).get("title", folder.name))
+    emit({"ok": True, "dir": str(folder), "notes": str(notes_path)}, args.json,
+         f"regenerated {notes_path}")
 
 
 def detect_platform(url: str) -> str | None:
@@ -1318,6 +1392,10 @@ def build_parser() -> argparse.ArgumentParser:
     proc = add("process", help="transcribe, attribute speakers, extract, write to vault")
     proc.add_argument("path", nargs="?", help="recording dir (default: most recent)")
     proc.set_defaults(func=cmd_process)
+
+    retry_notes = add("regenerate-notes", help="retry notes from a saved meeting transcript")
+    retry_notes.add_argument("path", help="vault meeting folder")
+    retry_notes.set_defaults(func=cmd_regenerate_notes)
 
     lst = add("list", help="meetings in the vault")
     lst.add_argument("--since")

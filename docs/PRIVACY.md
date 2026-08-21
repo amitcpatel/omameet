@@ -28,6 +28,10 @@ omascribe-meetings ai disable
 ```
 
 Transcription continues locally and deterministic basic notes are still written.
+When AI is enabled, an AI-notes failure is recorded as partial processing rather
+than success, and source audio is retained. Saved transcripts can be explicitly
+retried with `regenerate-notes`; this sends transcript text to the same resolved
+cloud service under the existing OmaScribe consent.
 
 ## Agent restrictions
 

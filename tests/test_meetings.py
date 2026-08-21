@@ -368,7 +368,7 @@ class CliTest(unittest.TestCase):
         r = self.run_cli("version", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["name"], "omascribe")
-        self.assertEqual(json.loads(r.stdout)["version"], "0.5.2")
+        self.assertEqual(json.loads(r.stdout)["version"], "0.5.3")
 
     def test_fetch_model_rejects_path_traversal(self):
         r = self.run_cli("fetch-model", "../evil", "--json")
@@ -473,9 +473,10 @@ class CliTest(unittest.TestCase):
 
             def notes_local(_meeting, _participants, _extracted, _text, backend):
                 seen.append(("notes", backend))
-                return "## Notes\n\n_Local processing._\n"
+                return {"ok": True, "optimized": False, "error": None,
+                        "body": "## Notes\n\n_Local processing._\n"}
 
-            extract = types.SimpleNamespace(extract=extract_local, write_notes=notes_local)
+            extract = types.SimpleNamespace(extract=extract_local, generate_notes=notes_local)
             vault = types.SimpleNamespace(write_meeting=lambda *_args: {
                 "ok": True, "dir": str(root / "vault"), "audio_deleted": True,
                 "audio_retained": False, "extraction_ok": True})
@@ -504,6 +505,45 @@ class CliTest(unittest.TestCase):
             r = self.run_cli("ai", "enable", "claude",
                              env={"XDG_CONFIG_HOME": d, "XDG_STATE_HOME": d})
             self.assertNotEqual(r.returncode, 0)
+
+    def test_regenerate_notes_repairs_saved_meeting_without_audio(self):
+        mod = load_helper()
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            (folder / "meeting.json").write_text(json.dumps({
+                "meeting": {"title": "Recovered"}, "participants": [],
+                "commitments": [], "decisions": [], "risks": [], "questions": [],
+                "verification": {"files_written": True, "extraction_ok": True},
+            }))
+            (folder / "transcript.md").write_text("saved transcript")
+            (folder / "notes.md").write_text("placeholder")
+            extract = types.SimpleNamespace(generate_notes=lambda *_args: {
+                "ok": True, "optimized": True, "error": None,
+                "body": "## Notes\n\nRecovered notes.\n",
+            })
+            vault = types.SimpleNamespace(frontmatter=lambda *_args: "---\n---\n")
+            originals = {name: sys.modules.get(name) for name in ("extract", "vault")}
+            original_config, original_notify, original_emit = mod.config, mod.notify, mod.emit
+            sys.modules.update({"extract": extract, "vault": vault})
+            mod.config = lambda: mod.deep_merge(
+                mod.DEFAULT_CONFIG, {"vault": {"path": str(folder.parent)}})
+            mod.notify = lambda *_args, **_kwargs: None
+            emitted = []
+            mod.emit = lambda payload, *_args: emitted.append(payload)
+            try:
+                mod.cmd_regenerate_notes(types.SimpleNamespace(path=str(folder), json=True))
+            finally:
+                mod.config, mod.notify, mod.emit = original_config, original_notify, original_emit
+                for name, value in originals.items():
+                    if value is None:
+                        sys.modules.pop(name, None)
+                    else:
+                        sys.modules[name] = value
+            self.assertIn("Recovered notes.", (folder / "notes.md").read_text())
+            contract = json.loads((folder / "meeting.json").read_text())
+            self.assertTrue(contract["verification"]["notes_ok"])
+            self.assertTrue(contract["notes"]["optimized"])
+            self.assertTrue(emitted[0]["ok"])
 
     def test_stop_without_session_fails_loud(self):
         with tempfile.TemporaryDirectory() as d:
@@ -567,6 +607,20 @@ class AudioRetentionTest(unittest.TestCase):
             res, audio = self._write(tmp, {"commitments": [], "decisions": []})
             self.assertFalse(audio.exists(), "audio should be deleted after full success")
             self.assertTrue(res["verified"])
+
+    def test_audio_kept_when_requested_ai_notes_failed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            res, audio = self._write(tmp, {
+                "commitments": [], "decisions": [],
+                "notes": {"ok": False, "optimized": False,
+                          "error": "llm exited 1: rate limited"},
+            })
+            self.assertTrue(audio.exists(), "audio MUST be kept when AI notes fail")
+            self.assertFalse(res["verified"])
+            self.assertFalse(res["notes_ok"])
+            contract = json.loads((Path(res["dir"]) / "meeting.json").read_text())
+            self.assertEqual(contract["verification"]["notes_error"],
+                             "llm exited 1: rate limited")
 
     def test_ai_disabled_is_successful_local_processing(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -731,6 +785,34 @@ class ExtractionTest(unittest.TestCase):
             self.e.call_llm = original
         self.assertTrue(notes.startswith("## Notes"))
         self.assertIn("- [ ] Amit → Send the report 📅 2026-08-21", notes)
+
+    def test_enabled_ai_notes_failure_is_not_reported_as_success(self):
+        original = self.e.call_llm
+        self.e.call_llm = lambda *_args: (False, "llm exited 1: rate limited")
+        try:
+            result = self.e.generate_notes(
+                {"title": "Test"}, [], {"commitments": [], "decisions": [],
+                                          "risks": [], "questions": []},
+                "transcript", "omarchy")
+        finally:
+            self.e.call_llm = original
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["optimized"])
+        self.assertEqual(result["error"], "llm exited 1: rate limited")
+
+    def test_disabled_ai_notes_fallback_is_intentional_success(self):
+        original = self.e.call_llm
+        self.e.call_llm = lambda *_args: (False, "no LLM backend available")
+        try:
+            result = self.e.generate_notes(
+                {"title": "Test"}, [], {"commitments": [], "decisions": [],
+                                          "risks": [], "questions": []},
+                "transcript", "disabled")
+        finally:
+            self.e.call_llm = original
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["optimized"])
+        self.assertIsNone(result["error"])
 
 
 class ModelIntegrityTest(unittest.TestCase):

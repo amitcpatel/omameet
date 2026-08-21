@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.5.3 — make requested AI notes part of pipeline success
+
+- Treat an enabled AI notes pass as successful only when it returns non-empty
+  notes; persist its exact error, exit nonzero, notify urgently, and retain audio
+  when it fails.
+- Clarify that Grok must use only supplied context and must not inspect files or
+  call tools, preventing an unnecessary second turn while preserving the
+  one-turn and tool-denial safeguards.
+- Add `regenerate-notes FOLDER` to retry notes safely from an existing saved
+  transcript when source audio is unavailable.
+
 ## 0.5.2 — Google Calendar only
 
 - Remove the entire optional iCalendar subsystem: feed storage, local and remote

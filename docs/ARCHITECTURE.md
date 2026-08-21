@@ -28,7 +28,7 @@ the UI does not depend on an installation hook or the user's `PATH`.
 
 The default backend is `disabled`. Enabling AI in OmaScribe Settings persists the
 user's OmaScribe-specific consent by selecting `omarchy`, not a hard-coded model.
-At processing time OmaScribe runs `omarchy-default-agent`. Version 0.5.2
+At processing time OmaScribe runs `omarchy-default-agent`. Version 0.5.3
 supports Grok and deliberately fails closed for unsupported agents. Grok is
 invoked for a single turn with tools denied, web search disabled, subagents
 disabled, and no model override.
