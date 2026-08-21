@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.4 — capture the meeting application and verify transcript coverage
+
+- Resolve active input and output routes for known meeting applications through
+  PulseAudio/PipeWire instead of assuming their devices match system defaults.
+- Open explicit meeting links first, briefly wait for Chrome or the meeting app
+  to expose both routes, and record route provenance or fallback status in the
+  session and meeting contract.
+- Reject long transcripts below a conservative spoken-word coverage floor,
+  persist the coverage result, notify urgently, and retain all source audio.
+- Runtime-verify Pulse monitor capture through Opus and the allowlisted
+  `large-v3-turbo` model in addition to 127 behavioral tests.
+
 ## 0.5.3 — make requested AI notes part of pipeline success
 
 - Treat an enabled AI notes pass as successful only when it returns non-empty

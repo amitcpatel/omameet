@@ -105,12 +105,12 @@ If the optional CLI links were not installed, run the helper from the plugin:
 - [Privacy and security boundaries](docs/PRIVACY.md)
 - [Troubleshooting and recovery](docs/TROUBLESHOOTING.md)
 - [Release history](CHANGELOG.md)
-- [0.5.3 release gate](RELEASE_STATUS.md)
+- [0.5.4 release gate](RELEASE_STATUS.md)
 - [Independent review record](REVIEW_FINDINGS.md)
 
 ## Development status
 
-Version 0.5.3 carries the reviewed safeguards under the distinct OmaScribe
+Version 0.5.4 carries the reviewed safeguards under the distinct OmaScribe
 identity. It restores ad-hoc recording,
 follows Omarchy's default AI agent, and makes Google Calendar the opinionated
 and only calendar experience. Every Whisper model is accepted only after

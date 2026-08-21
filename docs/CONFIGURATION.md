@@ -34,6 +34,10 @@ minimal file may override only the values that differ.
 | `capture.silenceStopSec` | `300` | Stop after sustained silence |
 | `capture.appExitGraceSec` | `90` | Grace period after a meeting app exits |
 
+`audio.mic: "auto"` and `audio.system: "auto-monitor"` prefer the active routes
+of a known meeting application. System defaults are a recorded fallback only
+when the application has not exposed both routes yet.
+
 The panel's plugin-level refresh and detector intervals are stored by the
 Omarchy shell from `manifest.json`; they are separate from the meeting JSON.
 

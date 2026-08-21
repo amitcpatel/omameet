@@ -87,6 +87,7 @@ def transcribe(audio: Path, workdir: Path, model_name: str = "large-v3-turbo",
     wav = workdir / "whisper-input.wav"
     if not to_wav16k(audio, wav):
         return {"ok": False, "error": "ffmpeg failed to produce 16kHz wav", "segments": []}
+    duration_sec = wav_duration(wav)
 
     cmd = [binary, "-m", str(model), "-f", str(wav), "-l", lang, "-nt" if False else "-pp"]
     cmd = [binary, "-m", str(model), "-f", str(wav), "-l", lang]
@@ -119,7 +120,31 @@ def transcribe(audio: Path, workdir: Path, model_name: str = "large-v3-turbo",
     if not full:
         return {"ok": False, "error": "transcript is empty — treating as failure",
                 "segments": [], "model": model.name}
-    return {"ok": True, "segments": segments, "text": full, "model": model.name}
+    return {"ok": True, "segments": segments, "text": full, "model": model.name,
+            "duration_sec": duration_sec}
+
+
+def transcript_coverage(segments: list[dict], duration_sec: float) -> dict:
+    """Reject long recordings whose decoded transcript is mostly non-speech."""
+    speech = []
+    for segment in segments:
+        text = re.sub(r"\[[^]]*\]", " ", str(segment.get("text", "")))
+        speech.extend(re.findall(r"[A-Za-z0-9']+", text))
+    words = len(speech)
+    minutes = max(float(duration_sec or 0.0) / 60.0, 1 / 60)
+    words_per_minute = words / minutes
+    required = max(5, int(minutes * 12))
+    ok = duration_sec < 60 or words >= required
+    return {
+        "ok": ok,
+        "words": words,
+        "duration_sec": round(float(duration_sec or 0.0), 1),
+        "words_per_minute": round(words_per_minute, 1),
+        "minimum_words": required,
+        "reason": None if ok else (
+            f"transcript coverage too sparse: {words} spoken words over "
+            f"{minutes:.1f} minutes; expected at least {required}"),
+    }
 
 
 # ---------------------------------------------------------------------------

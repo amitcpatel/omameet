@@ -15,10 +15,13 @@ the UI does not depend on an installation hook or the user's `PATH`.
 2. `Service.qml` periodically invokes `omascribe-meetings tick`.
 3. Calendar time supplies context; microphone use by a known meeting app is the
    automatic recording trigger. Calendar presence alone never starts capture.
-4. `ffmpeg` captures microphone and monitor audio into a meeting session.
+4. OmaScribe resolves the known meeting application's active PipeWire/Pulse
+   input and output routes when available, then `ffmpeg` captures microphone and
+   monitor audio into a meeting session. Route provenance is stored with it.
 5. Manual Stop or the detector's stop condition launches processing in a
    transient user service.
-6. `lib/transcribe.py` invokes local `whisper-cli`.
+6. `lib/transcribe.py` invokes local `whisper-cli` and rejects implausibly sparse
+   long-meeting transcripts before extraction or irreversible audio deletion.
 7. `lib/extract.py` extracts verified structured outcomes and renders notes.
 8. `lib/vault.py` writes the meeting folder and audit metadata.
 9. Source audio is removed only after the pipeline reports complete success,
@@ -28,7 +31,7 @@ the UI does not depend on an installation hook or the user's `PATH`.
 
 The default backend is `disabled`. Enabling AI in OmaScribe Settings persists the
 user's OmaScribe-specific consent by selecting `omarchy`, not a hard-coded model.
-At processing time OmaScribe runs `omarchy-default-agent`. Version 0.5.3
+At processing time OmaScribe runs `omarchy-default-agent`. Version 0.5.4
 supports Grok and deliberately fails closed for unsupported agents. Grok is
 invoked for a single turn with tools denied, web search disabled, subagents
 disabled, and no model override.

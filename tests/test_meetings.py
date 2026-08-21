@@ -126,7 +126,7 @@ class ThemeComplianceTest(unittest.TestCase):
         self.assertIn("root.controller.show()", source)
         self.assertIn("root.controller.hide()", source)
 
-    def test_calendar_join_starts_capture_before_opening_url(self):
+    def test_calendar_join_uses_bundled_capture_workflow(self):
         source = (QML_DIR / "Panel.qml").read_text()
         self.assertIn('function joinMeeting(event)', source)
         self.assertIn('meetingsHelper, "join"', source)
@@ -257,6 +257,35 @@ class HelperTest(unittest.TestCase):
         for b in banned:
             self.assertNotIn(b, source, f"third-party dependency found: {b}")
 
+    def test_active_meeting_app_routes_override_system_defaults(self):
+        cfg = self.mod.DEFAULT_CONFIG
+        objects = {
+            "sources": [{"index": 41, "name": "wave3.mic"}],
+            "sinks": [{"index": 52, "name": "meet.output",
+                       "monitor_source": "meet.output.monitor"}],
+            "source-outputs": [{"source": 41, "corked": False,
+                                "properties": {"application.process.binary": "chrome"}}],
+            "sink-inputs": [{"sink": 52, "corked": False,
+                              "properties": {"application.process.binary": "chrome"}}],
+        }
+        with patch.object(self.mod, "pactl_objects", side_effect=lambda kind: objects[kind]), \
+                patch.object(self.mod, "default_source", return_value="wrong.default.mic"), \
+                patch.object(self.mod, "default_sink", return_value="wrong.default.sink"):
+            system, mic, detail = self.mod.resolve_devices(cfg)
+        self.assertEqual(mic, "wave3.mic")
+        self.assertEqual(system, "meet.output.monitor")
+        self.assertTrue(detail["verified"])
+        self.assertFalse(detail["fallback"])
+
+    def test_unavailable_app_routes_are_recorded_as_fallback(self):
+        with patch.object(self.mod, "pactl_objects", return_value=[]), \
+                patch.object(self.mod, "default_source", return_value="default.mic"), \
+                patch.object(self.mod, "default_sink", return_value="default.sink"):
+            system, mic, detail = self.mod.resolve_devices(self.mod.DEFAULT_CONFIG)
+        self.assertEqual((system, mic), ("default.sink.monitor", "default.mic"))
+        self.assertFalse(detail["verified"])
+        self.assertTrue(detail["fallback"])
+
     def test_retain_audio_defaults_false(self):
         self.assertFalse(self.mod.DEFAULT_CONFIG["retainAudio"])
 
@@ -368,7 +397,7 @@ class CliTest(unittest.TestCase):
         r = self.run_cli("version", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["name"], "omascribe")
-        self.assertEqual(json.loads(r.stdout)["version"], "0.5.3")
+        self.assertEqual(json.loads(r.stdout)["version"], "0.5.4")
 
     def test_fetch_model_rejects_path_traversal(self):
         r = self.run_cli("fetch-model", "../evil", "--json")
@@ -462,6 +491,9 @@ class CliTest(unittest.TestCase):
             }))
             transcribe = types.SimpleNamespace(
                 transcribe=lambda *_args: {"ok": True, "segments": [], "model": "test"},
+                transcript_coverage=lambda *_args: {
+                    "ok": True, "words": 0, "duration_sec": 0,
+                    "words_per_minute": 0, "minimum_words": 5, "reason": None},
                 diarize=lambda *_args: ([], "test"),
                 resolve_speakers=lambda *_args: ([], []),
                 render_transcript=lambda *_args: "marker transcript")
@@ -855,6 +887,20 @@ class ModelIntegrityTest(unittest.TestCase):
             self.assertFalse(result["ok"])
             self.assertIn("SHA-256", result["error"])
             run.assert_not_called()
+
+    def test_sparse_long_transcript_fails_coverage_gate(self):
+        segments = [
+            {"text": "Hello, we can get started."},
+            *({"text": "[ Pause ]"} for _ in range(20)),
+        ]
+        result = self.transcribe.transcript_coverage(segments, 630)
+        self.assertFalse(result["ok"])
+        self.assertLess(result["words_per_minute"], 12)
+
+    def test_substantive_transcript_passes_coverage_gate(self):
+        segments = [{"text": " ".join(["discussion"] * 150)}]
+        result = self.transcribe.transcript_coverage(segments, 600)
+        self.assertTrue(result["ok"])
 
 
 class SpeakerResolutionTest(unittest.TestCase):

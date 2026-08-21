@@ -8,6 +8,10 @@
 - Meeting metadata and structured extraction records
 - Obsidian-compatible notes and retained recovery audio
 
+Audio route inspection uses local PulseAudio/PipeWire metadata only. OmaScribe
+records the selected route names and whether application routing was verified in
+the local session contract; it does not send that routing metadata to a service.
+
 Google Calendar data is fetched from Google's API using the user's OAuth grant.
 The requested scope is read-only. Refresh tokens are stored through the system
 keyring rather than embedded in plugin configuration.

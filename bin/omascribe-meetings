@@ -29,7 +29,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 APP = "omascribe"
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 
 # lib/ ships alongside bin/ inside the plugin folder
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -251,20 +251,89 @@ def default_source() -> str | None:
     return out or None if code == 0 else None
 
 
-def resolve_devices(cfg: dict) -> tuple[str, str]:
+def pactl_objects(kind: str) -> list[dict]:
+    code, out, _ = run(["pactl", "-f", "json", "list", kind])
+    if code != 0 or not out:
+        return []
+    try:
+        value = json.loads(out)
+        return value if isinstance(value, list) else []
+    except ValueError:
+        return []
+
+
+def application_audio_routes(cfg: dict) -> dict | None:
+    """Return active input/output endpoints used by a known meeting app."""
+    known = tuple(str(value).lower() for value in
+                  cfg.get("detection", {}).get("knownMeetingApps", []))
+
+    def matches(item: dict) -> bool:
+        props = item.get("properties") or {}
+        identity = " ".join(str(props.get(key, "")) for key in (
+            "application.process.binary", "application.name", "media.name",
+            "node.name", "application.process.host"))
+        identity = identity.lower()
+        return any(name and name in identity for name in known)
+
+    sources = {item.get("index"): item.get("name")
+               for item in pactl_objects("sources")}
+    sinks = {item.get("index"): item for item in pactl_objects("sinks")}
+    captures = [item for item in pactl_objects("source-outputs")
+                if matches(item) and not item.get("corked", False)]
+    playbacks = [item for item in pactl_objects("sink-inputs")
+                 if matches(item) and not item.get("corked", False)]
+    if not captures and not playbacks:
+        return None
+    capture = captures[0] if captures else None
+    playback = playbacks[0] if playbacks else None
+    mic = sources.get(capture.get("source")) if capture else None
+    sink = sinks.get(playback.get("sink")) if playback else None
+    system = (sink or {}).get("monitor_source") or (
+        f"{sink.get('name')}.monitor" if sink and sink.get("name") else None)
+    if not mic and not system:
+        return None
+    return {
+        "mic": mic,
+        "system": system,
+        "capture": (capture or {}).get("properties", {}).get(
+            "application.process.binary"),
+        "playback": (playback or {}).get("properties", {}).get(
+            "application.process.binary"),
+    }
+
+
+def wait_for_application_audio_routes(cfg: dict, timeout: float = 15.0) -> bool:
+    """Give a newly opened meeting time to expose its PipeWire routes."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        routes = application_audio_routes(cfg)
+        if routes and routes.get("mic") and routes.get("system"):
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def resolve_devices(cfg: dict) -> tuple[str, str, dict]:
     audio = cfg["audio"]
+    routes = application_audio_routes(cfg)
     sink = default_sink()
     system = audio["system"]
     if system == "auto-monitor":
-        if not sink:
+        system = (routes or {}).get("system")
+        if not system and not sink:
             fail("no default sink; cannot capture system audio")
-        system = f"{sink}.monitor"
+        system = system or f"{sink}.monitor"
     mic = audio["mic"]
     if mic == "auto":
-        mic = default_source()
+        mic = (routes or {}).get("mic") or default_source()
         if not mic:
             fail("no default source; cannot capture microphone")
-    return system, mic
+    route_detail = {
+        "verified": bool(routes and routes.get("mic") and routes.get("system")),
+        "application": routes or {},
+        "fallback": not bool(routes and routes.get("mic") and routes.get("system")),
+    }
+    return system, mic, route_detail
 
 
 def peak_dbfs(path: Path) -> float | None:
@@ -559,7 +628,7 @@ def start_recording(cfg: dict, title: str, event: dict | None) -> dict:
     if free < cfg["minFreeDiskMB"]:
         fail(f"only {free} MB free, need {cfg['minFreeDiskMB']} MB — refusing to start")
 
-    system, mic = resolve_devices(cfg)
+    system, mic, route_detail = resolve_devices(cfg)
     started = now()
     slug = started.strftime("%Y-%m-%d-%H%M%S")
     outdir = RECORDINGS_DIR / slug
@@ -593,6 +662,7 @@ def start_recording(cfg: dict, title: str, event: dict | None) -> dict:
         "event_id": (event or {}).get("id") or f"adhoc_{slug}",
         "started": iso(started),
         "devices": {"system": system, "mic": mic},
+        "audio_route": route_detail,
         "host_machine": os.uname().nodename,
         "pids": {"mic": p_mic.pid, "system": p_sys.pid, "mixed": p_mix.pid},
         "adhoc": event is None,
@@ -663,18 +733,20 @@ def cmd_record(args) -> None:
 
 
 def cmd_join(args) -> None:
-    """Start capture with calendar context, then open the meeting URL."""
+    """Open a meeting, resolve its audio routes, then start capture."""
     if not re.match(r"^https://", args.url or "", re.I):
         fail("refusing non-HTTPS meeting URL")
     try:
         event = json.loads(args.event_json)
     except (TypeError, ValueError):
         fail("invalid calendar event JSON")
-    sess = session()
-    if not sess:
-        sess = start_recording(config(), args.title or "Meeting", event)
     subprocess.Popen(["xdg-open", args.url], stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, start_new_session=True)
+    sess = session()
+    if not sess:
+        cfg = config()
+        wait_for_application_audio_routes(cfg)
+        sess = start_recording(cfg, args.title or "Meeting", event)
     emit({"recording": True, "dir": sess["dir"], "url": args.url}, args.json,
          f"recording and joining: {sess['title']}")
 
@@ -844,6 +916,14 @@ def cmd_process(args) -> None:
     tr = T.transcribe(mixed, src, cfg["transcription"]["model"], cfg["transcription"]["lang"])
     if not tr["ok"]:
         fail(f"transcription failed: {tr['error']} (audio retained)")
+    coverage = T.transcript_coverage(tr["segments"], tr.get("duration_sec", 0.0))
+    meta["transcription_check"] = coverage
+    write_json_atomic(src / "session.json", meta)
+    if not coverage["ok"]:
+        notify("Meeting transcription FAILED",
+               f"{meta.get('title', 'Meeting')} — {coverage['reason']} (audio retained)",
+               urgent=True)
+        fail(f"{coverage['reason']} (audio retained)", notify_user=False)
 
     # 2. speaker attribution
     segments, method = T.diarize(tr["segments"], mic_wav, sys_wav, mixed, src)
@@ -867,9 +947,11 @@ def cmd_process(args) -> None:
         "organizer": event.get("organizer"),
         "calendar": {"label": event.get("calendarLabel")},
         "host_machine": meta.get("host_machine"),
+        "audio_route": meta.get("audio_route", {}),
         "adhoc": meta.get("adhoc", True),
         "diarization_method": method,
         "transcript_model": tr.get("model"),
+        "transcript_coverage": coverage,
     }
 
     # 3. three-pass extraction
