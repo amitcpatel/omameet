@@ -1,5 +1,7 @@
 import importlib.machinery
 import importlib.util
+import contextlib
+import io
 import unittest
 import tempfile
 from datetime import datetime
@@ -36,191 +38,19 @@ class CalendarTests(unittest.TestCase):
         self.assertIn("omarchy-calendar", calls[1][0])
         self.assertEqual("legacy-token", calls[2][1])
 
-    def test_ical_parses_folded_text_and_meeting_link(self):
+    def test_only_google_calendar_sources_are_exposed(self):
         calendar = load_module()
-        feed = {"id": "work", "name": "Work", "source": "file:///unused"}
-        text = """BEGIN:VCALENDAR\r
-BEGIN:VEVENT\r
-UID:standup\r
-DTSTART:20260819T130000Z\r
-DTEND:20260819T133000Z\r
-SUMMARY:Team stand\r
- up\r
-DESCRIPTION:Join https://meet.google.com/abc-defg-hij\r
-END:VEVENT\r
-END:VCALENDAR\r
-"""
-        original = calendar.read_ical_source
-        calendar.read_ical_source = lambda _: text
-        try:
-            events = calendar.ical_events(feed, calendar.date(2026, 8, 19))
-        finally:
-            calendar.read_ical_source = original
-        self.assertEqual(events[0]["title"], "Team standup")
-        self.assertEqual(events[0]["joinUrl"], "https://meet.google.com/abc-defg-hij")
-        self.assertEqual(events[0]["calendarLabel"], "Work")
+        removed = (
+            "FEEDS_FILE", "feeds", "add_feed", "remove_feed", "read_ical_source",
+            "parse_ical", "ical_events", "fetch_public_https",
+        )
+        for name in removed:
+            self.assertFalse(hasattr(calendar, name), name)
 
-    def test_ical_all_day_and_exdate(self):
-        calendar = load_module()
-        text = """BEGIN:VCALENDAR
-BEGIN:VEVENT
-UID:holiday
-DTSTART;VALUE=DATE:20260819
-DTEND;VALUE=DATE:20260820
-SUMMARY:Holiday
-END:VEVENT
-BEGIN:VEVENT
-UID:daily
-DTSTART:20260817T090000
-DTEND:20260817T093000
-RRULE:FREQ=DAILY;COUNT=4
-EXDATE:20260819T090000
-SUMMARY:Daily
-END:VEVENT
-END:VCALENDAR
-"""
-        original = calendar.read_ical_source
-        calendar.read_ical_source = lambda _: text
-        try:
-            events = calendar.ical_events(
-                {"id": "one", "name": "Personal", "source": "file:///unused"},
-                calendar.date(2026, 8, 19))
-        finally:
-            calendar.read_ical_source = original
-        self.assertEqual([event["title"] for event in events], ["Holiday"])
-        self.assertTrue(events[0]["allDay"])
-
-    def test_ical_weekly_byday(self):
-        calendar = load_module()
-        raw = calendar.parse_ical("""BEGIN:VCALENDAR
-BEGIN:VEVENT
-UID:class
-DTSTART:20260817T100000
-DTEND:20260817T110000
-RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=4
-SUMMARY:Class
-END:VEVENT
-END:VCALENDAR
-""")[0]
-        zone = calendar.datetime.now().astimezone().tzinfo
-        starts = calendar.recurrence_starts(
-            raw,
-            calendar.datetime(2026, 8, 19, tzinfo=zone),
-            calendar.datetime(2026, 8, 20, tzinfo=zone))
-        self.assertTrue(any(value.date() == calendar.date(2026, 8, 19) for value in starts))
-
-    def test_feed_add_rejects_insecure_http(self):
-        calendar = load_module()
-        with self.assertRaisesRegex(ValueError, "https"):
-            calendar.add_feed("http://example.com/calendar.ics", "Work")
-
-    def test_feed_add_rejects_file_url(self):
-        calendar = load_module()
-        with self.assertRaisesRegex(ValueError, "local .ics path"):
-            calendar.add_feed("file:///etc/passwd", "Unsafe")
-
-    def test_feed_add_rejects_private_and_local_hosts(self):
-        calendar = load_module()
-        for url in ("https://127.0.0.1/calendar.ics",
-                    "https://169.254.169.254/calendar.ics",
-                    "https://10.0.0.5/calendar.ics"):
-            with self.assertRaisesRegex(ValueError, "private or local"):
-                calendar.validate_remote_calendar_url(url)
-
-    def test_feed_fetch_connects_to_the_exact_validated_ip(self):
-        calendar = load_module()
-        raw_socket = object()
-        wrapped_socket = object()
-        tls_hosts = []
-
-        class Context:
-            def wrap_socket(self, sock, *, server_hostname):
-                if sock is not raw_socket:
-                    raise AssertionError("TLS did not wrap the pinned socket")
-                tls_hosts.append(server_hostname)
-                return wrapped_socket
-
-        connection = calendar.PinnedHTTPSConnection(
-            "calendar.example", 443, "93.184.216.34")
-        connection._context = Context()
-        with patch.object(calendar.socket, "create_connection", return_value=raw_socket) as connect:
-            connection.connect()
-
-        connect.assert_called_once_with(("93.184.216.34", 443), 20, None)
-        self.assertIs(connection.sock, wrapped_socket)
-        self.assertEqual(tls_hosts, ["calendar.example"])
-
-    def test_feed_redirect_cannot_change_origin(self):
-        calendar = load_module()
-
-        class Response:
-            status = 302
-            def getheader(self, _name):
-                return "https://attacker.example/feed.ics"
-
-        class Connection:
-            def request(self, *_args, **_kwargs):
-                pass
-            def getresponse(self):
-                return Response()
-            def close(self):
-                pass
-
-        def resolve(url):
-            return calendar.urllib.parse.urlparse(url), ("93.184.216.34",)
-
-        with patch.object(calendar, "resolve_public_https_url", side_effect=resolve), \
-                patch.object(calendar, "PinnedHTTPSConnection", return_value=Connection()):
-            with self.assertRaisesRegex(ValueError, "changed origin"):
-                calendar.fetch_public_https("https://calendar.example/feed.ics", {})
-
-    def test_feed_fetch_passes_resolved_ip_to_pinned_connection(self):
-        calendar = load_module()
-        calls = []
-
-        class Response:
-            status = 200
-            def getheader(self, _name):
-                return None
-            def read(self, _limit):
-                return b"BEGIN:VCALENDAR\nEND:VCALENDAR\n"
-
-        class Connection:
-            def request(self, method, path, headers):
-                calls.append((method, path, headers))
-            def getresponse(self):
-                return Response()
-            def close(self):
-                pass
-
-        def factory(host, port, pinned_ip, *, timeout):
-            calls.append((host, port, pinned_ip, timeout))
-            return Connection()
-
-        resolved = (calendar.urllib.parse.urlparse(
-            "https://calendar.example/feed.ics?private=1"), ("93.184.216.34",))
-        with patch.object(calendar, "resolve_public_https_url", return_value=resolved), \
-                patch.object(calendar, "PinnedHTTPSConnection", side_effect=factory):
-            data = calendar.fetch_public_https(
-                "https://calendar.example/feed.ics?private=1", {"Accept": "text/calendar"})
-
-        self.assertTrue(data.startswith(b"BEGIN:VCALENDAR"))
-        self.assertEqual(calls[0], ("calendar.example", 443, "93.184.216.34", 20))
-        self.assertEqual(calls[1][0:2], ("GET", "/feed.ics?private=1"))
-
-    def test_feed_preferences_are_stored_with_private_permissions(self):
-        calendar = load_module()
-        with tempfile.TemporaryDirectory() as directory:
-            calendar.STATE = Path(directory)
-            calendar.FEEDS_FILE = calendar.STATE / "feeds.json"
-            calendar.CACHE_DIR = calendar.STATE / "cache"
-            source = Path(directory) / "calendar.ics"
-            source.write_text("BEGIN:VCALENDAR\nEND:VCALENDAR\n")
-            item = calendar.add_feed(str(source), "Personal")
-            self.assertEqual(calendar.feeds()[0]["name"], "Personal")
-            self.assertEqual(calendar.FEEDS_FILE.stat().st_mode & 0o777, 0o600)
-            calendar.update_feed(item["id"], enabled=False)
-            self.assertFalse(calendar.feeds()[0]["enabled"])
+        with patch.object(calendar.sys, "argv", ["omascribe-calendar", "source", "list"]), \
+                contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaisesRegex(SystemExit, "2"):
+                calendar.main()
 
     def test_meeting_url_prefers_structured_video(self):
         calendar = load_module()

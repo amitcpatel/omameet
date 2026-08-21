@@ -1,8 +1,8 @@
-# OmaScribe 0.5.1 release status
+# OmaScribe 0.5.2 release status
 
 ## Product direction
 
-OmaScribe 0.5.1 is the personal-first, opinionated Omarchy meeting assistant:
+OmaScribe 0.5.2 is the personal-first, opinionated Omarchy meeting assistant:
 
 - Google Calendar through the user's GCP OAuth project.
 - Scheduled and ad-hoc recording from the shell panel.
@@ -15,7 +15,8 @@ OmaScribe 0.5.1 is the personal-first, opinionated Omarchy meeting assistant:
 
 - Restored the labelled Record/Stop control and processing after manual stop.
 - Added a dedicated settings view and simplified the calendar header.
-- Removed iCalendar subscription setup from the product UI.
+- Removed the entire non-Google calendar-feed subsystem, including its hidden
+  CLI, storage, parsing, network, agenda, and preference paths.
 - Replaced Claude/endpoint selection with dynamic `omarchy-default-agent`
   resolution.
 - Constrained Grok to one turn with tools denied, web search disabled, and
@@ -23,11 +24,8 @@ OmaScribe 0.5.1 is the personal-first, opinionated Omarchy meeting assistant:
 - Required explicit persisted consent before any transcript reaches Grok.
 - Moved Grok prompts from argv to private temporary files and removed ephemeral
   local Grok session state after each call.
-- Rejected private/local calendar feed hosts and cross-origin redirects.
 - Pinned the two supported Whisper model artifacts to an immutable upstream
   revision and verify their published SHA-256 values before use.
-- Bound remote iCalendar connections to the exact public IP validated for each
-  request while retaining TLS verification for the source hostname.
 - Hash-verify the exact allowlisted model before every normal transcription and
   reject arbitrary fallback GGML files.
 - Marked transcripts and meeting metadata as untrusted data in every AI pass.
@@ -47,6 +45,6 @@ omarchy plugin validate .
 git diff --check
 ```
 
-The marketplace submission and a `v0.5.1` tag must reference the same
+The marketplace submission and a `v0.5.2` tag must reference the same
 validated commit. Earlier OmaMeet tags remain historical and are not marketplace
 submission candidates.

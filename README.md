@@ -8,8 +8,8 @@ transcription, and AI-optimized Obsidian notes.
 
 The product assumptions are intentional:
 
-- Google Calendar is the primary calendar. Connecting it requires your own GCP
-  OAuth project.
+- Google Calendar is the only calendar source. Connecting it requires your own
+  GCP OAuth project.
 - Audio capture and transcription run locally.
 - Note optimization follows the default AI agent selected in Omarchy. OmaScribe
   does not maintain a separate provider, model, endpoint, or account picker.
@@ -105,14 +105,13 @@ If the optional CLI links were not installed, run the helper from the plugin:
 - [Privacy and security boundaries](docs/PRIVACY.md)
 - [Troubleshooting and recovery](docs/TROUBLESHOOTING.md)
 - [Release history](CHANGELOG.md)
-- [0.5.1 release gate](RELEASE_STATUS.md)
+- [0.5.2 release gate](RELEASE_STATUS.md)
 - [Independent review record](REVIEW_FINDINGS.md)
 
 ## Development status
 
-Version 0.5.1 carries the reviewed safeguards under the distinct OmaScribe
+Version 0.5.2 carries the reviewed safeguards under the distinct OmaScribe
 identity. It restores ad-hoc recording,
 follows Omarchy's default AI agent, and makes Google Calendar the opinionated
-primary calendar experience. Remote calendar connections are pinned to validated
-public addresses, and every Whisper model is accepted only after SHA-256
-verification against the immutable artifact allowlist.
+and only calendar experience. Every Whisper model is accepted only after
+SHA-256 verification against the immutable artifact allowlist.

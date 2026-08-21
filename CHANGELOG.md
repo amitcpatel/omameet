@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2 — Google Calendar only
+
+- Remove the entire optional iCalendar subsystem: feed storage, local and remote
+  source handling, parser and recurrence expansion, agenda merging, preference
+  branches, CLI commands, network code, and associated tests.
+- Add a regression proving the removed runtime symbols and `source` command are
+  unavailable. OmaScribe now accepts calendar data only through Google Calendar
+  using the user's read-only OAuth grant.
+
 ## 0.5.1 — bind network and model validation to consumption
 
 - Eliminate iCalendar DNS-rebinding exposure by connecting to the exact public

@@ -58,10 +58,8 @@ anchored Google Meet, Zoom, Microsoft Teams, and Webex hosts; lookalike domains
 are rejected. External links are passed to `xdg-open` as argument arrays, not
 through a shell command.
 
-Optional remote iCalendar feeds must use HTTPS. For every request and redirect,
-OmaScribe rejects non-public resolved addresses, connects directly to the exact
-public address it validated, and still verifies TLS against the calendar host.
-Redirects that change the scheme, host, or effective port are rejected.
+OmaScribe accepts calendar data only from Google Calendar through the user's
+read-only OAuth grant. It does not support local or remote calendar feeds.
 
 ## Model supply chain
 

@@ -368,7 +368,7 @@ class CliTest(unittest.TestCase):
         r = self.run_cli("version", "--json")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(json.loads(r.stdout)["name"], "omascribe")
-        self.assertEqual(json.loads(r.stdout)["version"], "0.5.1")
+        self.assertEqual(json.loads(r.stdout)["version"], "0.5.2")
 
     def test_fetch_model_rejects_path_traversal(self):
         r = self.run_cli("fetch-model", "../evil", "--json")

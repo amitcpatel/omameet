@@ -5,18 +5,13 @@ from __future__ import annotations
 
 import argparse
 import base64
-import calendar as month_calendar
 import hashlib
-import http.client
 import http.server
-import ipaddress
 import json
 import os
 import re
 import secrets
 import subprocess
-import socket
-import ssl
 import sys
 import urllib.parse
 import urllib.request
@@ -25,7 +20,6 @@ import time as time_module
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 APP = "omascribe-calendar"
 LEGACY_KEYRING_APP = "omarchy-calendar"
@@ -35,82 +29,10 @@ STATE = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state")) / A
 CLIENT_FILE = CONFIG / "client_secret.json"
 ACCOUNTS_FILE = STATE / "accounts.json"
 PREFERENCES_FILE = STATE / "preferences.json"
-FEEDS_FILE = STATE / "feeds.json"
 CACHE_DIR = STATE / "agenda-cache"
 CACHE_TTL_SECONDS = 300
 URL_RE = re.compile(r"https://(?:meet\.google\.com|(?:[\w-]+\.)*zoom\.us|teams\.microsoft\.com|(?:[\w-]+\.)*webex\.com)/[^\s<>\"]+", re.I)
 PRIORITIES = ("family", "work", "normal", "informational")
-
-
-def resolve_public_https_url(url: str) -> tuple[urllib.parse.ParseResult, tuple[str, ...]]:
-    """Validate an HTTPS URL and return the public addresses it may use."""
-    parsed = urllib.parse.urlparse(url)
-    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("calendar subscriptions must use a public https URL")
-    try:
-        addresses = sorted({item[4][0] for item in socket.getaddrinfo(
-            parsed.hostname, parsed.port or 443, type=socket.SOCK_STREAM)})
-    except socket.gaierror as exc:
-        raise ValueError("calendar subscription host could not be resolved") from exc
-    for value in addresses:
-        address = ipaddress.ip_address(value)
-        if (address.is_private or address.is_loopback or address.is_link_local
-                or address.is_reserved or address.is_multicast or address.is_unspecified):
-            raise ValueError("calendar subscriptions cannot use private or local hosts")
-    if not addresses:
-        raise ValueError("calendar subscription host could not be resolved")
-    return parsed, tuple(addresses)
-
-
-def validate_remote_calendar_url(url: str) -> urllib.parse.ParseResult:
-    """Compatibility wrapper for callers that need URL validation only."""
-    return resolve_public_https_url(url)[0]
-
-
-class PinnedHTTPSConnection(http.client.HTTPSConnection):
-    """Connect to a validated IP while verifying TLS for the original host."""
-
-    def __init__(self, host: str, port: int, pinned_ip: str, *, timeout: int = 20):
-        super().__init__(host, port=port, timeout=timeout,
-                         context=ssl.create_default_context())
-        self.pinned_ip = pinned_ip
-
-    def connect(self) -> None:
-        self.sock = socket.create_connection(
-            (self.pinned_ip, self.port), self.timeout, self.source_address)
-        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
-
-
-def fetch_public_https(url: str, headers: dict[str, str], *, max_redirects: int = 5) -> bytes:
-    """Fetch from the exact public address validated for each HTTPS hop."""
-    original = urllib.parse.urlparse(url)
-    current = url
-    for redirect_count in range(max_redirects + 1):
-        parsed, addresses = resolve_public_https_url(current)
-        if (parsed.scheme, parsed.hostname, parsed.port or 443) != (
-                original.scheme, original.hostname, original.port or 443):
-            raise ValueError("calendar feed redirect changed origin")
-        connection = PinnedHTTPSConnection(
-            parsed.hostname, parsed.port or 443, addresses[0], timeout=20)
-        path = urllib.parse.urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
-        try:
-            connection.request("GET", path, headers=headers)
-            response = connection.getresponse()
-            if response.status in (301, 302, 303, 307, 308):
-                location = response.getheader("Location")
-                if not location or redirect_count >= max_redirects:
-                    raise ValueError("calendar feed redirect limit exceeded")
-                current = urllib.parse.urljoin(current, location)
-                continue
-            if response.status < 200 or response.status >= 300:
-                raise ValueError(f"calendar feed returned HTTP {response.status}")
-            data = response.read(10 * 1024 * 1024 + 1)
-            if len(data) > 10 * 1024 * 1024:
-                raise ValueError("iCalendar feed exceeds 10 MB")
-            return data
-        finally:
-            connection.close()
-    raise ValueError("calendar feed redirect limit exceeded")
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -119,241 +41,6 @@ def atomic_json(path: Path, value: dict) -> None:
     temporary.write_text(json.dumps(value, indent=2) + "\n")
     temporary.chmod(0o600)
     temporary.replace(path)
-
-
-def feeds() -> list[dict]:
-    try:
-        value = json.loads(FEEDS_FILE.read_text()).get("feeds", [])
-        return value if isinstance(value, list) else []
-    except (OSError, json.JSONDecodeError):
-        return []
-
-
-def save_feeds(items: list[dict]) -> None:
-    atomic_json(FEEDS_FILE, {"feeds": items})
-    invalidate_cache()
-
-
-def add_feed(source: str, name: str | None = None) -> dict:
-    source = source.strip()
-    if source.startswith("webcal://"):
-        source = "https://" + source[len("webcal://"):]
-    parsed = urllib.parse.urlparse(source)
-    if parsed.scheme not in ("http", "https", "file"):
-        path = Path(source).expanduser().resolve()
-        if not path.is_file():
-            raise ValueError("iCalendar source must be an https URL or readable .ics file")
-        source = path.as_uri()
-    elif parsed.scheme == "file":
-        raise ValueError("use a local .ics path instead of a file URL")
-    elif parsed.scheme == "http":
-        raise ValueError("calendar subscriptions must use https")
-    elif parsed.scheme == "https":
-        validate_remote_calendar_url(source)
-    feed_id = hashlib.sha256(source.encode()).hexdigest()[:16]
-    item = {"id": feed_id, "name": (name or "Calendar").strip() or "Calendar",
-            "source": source, "enabled": True, "priority": "normal"}
-    # Validate before saving so a typo never leaves a broken source behind.
-    read_ical_source(item)
-    items = [old for old in feeds() if old.get("id") != feed_id]
-    items.append(item)
-    save_feeds(items)
-    return item
-
-
-def remove_feed(feed_id: str) -> None:
-    items = [item for item in feeds() if item.get("id") != feed_id]
-    if len(items) == len(feeds()):
-        raise ValueError(f"unknown iCalendar source: {feed_id}")
-    save_feeds(items)
-
-
-def read_ical_source(feed: dict) -> str:
-    source = str(feed.get("source", ""))
-    parsed = urllib.parse.urlparse(source)
-    if parsed.scheme == "file":
-        path = Path(urllib.request.url2pathname(parsed.path))
-        data = path.read_bytes()
-    else:
-        data = fetch_public_https(source, {
-            "Accept": "text/calendar, text/plain;q=0.9, */*;q=0.1",
-            "User-Agent": "OmaScribe/0.5",
-        })
-    text = data.decode("utf-8-sig", errors="replace")
-    if "BEGIN:VCALENDAR" not in text.upper():
-        raise ValueError("source is not an iCalendar feed")
-    return text
-
-
-def unfold_ical(text: str) -> list[str]:
-    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    unfolded: list[str] = []
-    for line in lines:
-        if line.startswith((" ", "\t")) and unfolded:
-            unfolded[-1] += line[1:]
-        else:
-            unfolded.append(line)
-    return unfolded
-
-
-def unescape_ical(value: str) -> str:
-    return (value.replace("\\N", "\n").replace("\\n", "\n")
-            .replace("\\,", ",").replace("\\;", ";").replace("\\\\", "\\"))
-
-
-def parse_content_line(line: str) -> tuple[str, dict, str] | None:
-    if ":" not in line:
-        return None
-    head, value = line.split(":", 1)
-    parts = head.split(";")
-    params = {}
-    for part in parts[1:]:
-        if "=" in part:
-            key, param_value = part.split("=", 1)
-            params[key.upper()] = param_value.strip('"')
-    return parts[0].upper(), params, unescape_ical(value)
-
-
-def parse_ical_datetime(value: str, params: dict) -> tuple[datetime, bool]:
-    is_date = params.get("VALUE") == "DATE" or (len(value) == 8 and "T" not in value)
-    if is_date:
-        return datetime.combine(datetime.strptime(value[:8], "%Y%m%d").date(), time.min,
-                                datetime.now().astimezone().tzinfo), True
-    utc = value.endswith("Z")
-    raw = value[:-1] if utc else value
-    fmt = "%Y%m%dT%H%M%S" if len(raw) >= 15 else "%Y%m%dT%H%M"
-    parsed = datetime.strptime(raw[:15] if len(raw) >= 15 else raw[:13], fmt)
-    if utc:
-        return parsed.replace(tzinfo=ZoneInfo("UTC")).astimezone(), False
-    tzid = params.get("TZID", "")
-    if tzid:
-        try:
-            return parsed.replace(tzinfo=ZoneInfo(tzid)).astimezone(), False
-        except ZoneInfoNotFoundError:
-            pass
-    return parsed.replace(tzinfo=datetime.now().astimezone().tzinfo), False
-
-
-def parse_ical(text: str) -> list[dict]:
-    events: list[dict] = []
-    current: dict | None = None
-    for line in unfold_ical(text):
-        upper = line.upper()
-        if upper == "BEGIN:VEVENT":
-            current = {}
-        elif upper == "END:VEVENT" and current is not None:
-            events.append(current)
-            current = None
-        elif current is not None:
-            parsed = parse_content_line(line)
-            if not parsed:
-                continue
-            key, params, value = parsed
-            if key in ("EXDATE", "RDATE"):
-                current.setdefault(key, []).extend((part, params) for part in value.split(","))
-            elif key not in current:
-                current[key] = (value, params)
-    return events
-
-
-def add_months(value: datetime, months: int) -> datetime:
-    index = value.year * 12 + value.month - 1 + months
-    year, month = divmod(index, 12)
-    day = min(value.day, month_calendar.monthrange(year, month + 1)[1])
-    return value.replace(year=year, month=month + 1, day=day)
-
-
-def recurrence_starts(event: dict, window_start: datetime, window_end: datetime) -> list[datetime]:
-    start, _ = parse_ical_datetime(*event["DTSTART"])
-    rule_raw = event.get("RRULE", ("", {}))[0]
-    if not rule_raw:
-        return [start] if start < window_end else []
-    rule = dict(part.split("=", 1) for part in rule_raw.split(";") if "=" in part)
-    freq = rule.get("FREQ", "").upper()
-    interval = max(1, int(rule.get("INTERVAL", "1")))
-    count = int(rule["COUNT"]) if rule.get("COUNT", "").isdigit() else None
-    until = None
-    if rule.get("UNTIL"):
-        until = parse_ical_datetime(rule["UNTIL"], {})[0]
-    bydays = rule.get("BYDAY", "").split(",") if rule.get("BYDAY") else []
-    weekdays = {"MO": 0, "TU": 1, "WE": 2, "TH": 3, "FR": 4, "SA": 5, "SU": 6}
-    output: list[datetime] = []
-    occurrence = 0
-    cursor = start
-    # Bound expansion: old feeds may begin years ago, but a day agenda needs only
-    # nearby instances. The cap also protects the shell from malicious feeds.
-    while cursor < window_end and occurrence < 10000:
-        candidates = [cursor]
-        if freq == "WEEKLY" and bydays:
-            week = cursor - timedelta(days=cursor.weekday())
-            candidates = [week + timedelta(days=weekdays[token[-2:]]) for token in bydays
-                          if token[-2:] in weekdays]
-        for candidate in sorted(candidates):
-            if candidate < start or (until and candidate > until):
-                continue
-            occurrence += 1
-            if count is not None and occurrence > count:
-                return output
-            if candidate < window_end:
-                output.append(candidate)
-        if until and cursor > until:
-            break
-        if count is not None and occurrence >= count:
-            break
-        if freq == "DAILY":
-            cursor += timedelta(days=interval)
-        elif freq == "WEEKLY":
-            cursor += timedelta(weeks=interval)
-        elif freq == "MONTHLY":
-            cursor = add_months(cursor, interval)
-        elif freq == "YEARLY":
-            cursor = add_months(cursor, 12 * interval)
-        else:
-            break
-    return output
-
-
-def ical_events(feed: dict, day: date) -> list[dict]:
-    zone = datetime.now().astimezone().tzinfo
-    window_start = datetime.combine(day, time.min, zone)
-    window_end = datetime.combine(day + timedelta(days=1), time.min, zone)
-    output = []
-    for raw in parse_ical(read_ical_source(feed)):
-        if "DTSTART" not in raw or raw.get("STATUS", ("", {}))[0].upper() == "CANCELLED":
-            continue
-        original_start, all_day = parse_ical_datetime(*raw["DTSTART"])
-        if "DTEND" in raw:
-            original_end, _ = parse_ical_datetime(*raw["DTEND"])
-        else:
-            original_end = original_start + (timedelta(days=1) if all_day else timedelta(hours=1))
-        duration = original_end - original_start
-        excluded = {parse_ical_datetime(value, params)[0] for value, params in raw.get("EXDATE", [])}
-        starts = recurrence_starts(raw, window_start, window_end)
-        starts.extend(parse_ical_datetime(value, params)[0] for value, params in raw.get("RDATE", []))
-        for start in starts:
-            end = start + duration
-            if start in excluded or end <= window_start or start >= window_end:
-                continue
-            title = raw.get("SUMMARY", ("(Untitled)", {}))[0] or "(Untitled)"
-            description = raw.get("DESCRIPTION", ("", {}))[0]
-            location = raw.get("LOCATION", ("", {}))[0]
-            url = raw.get("URL", ("", {}))[0]
-            synthetic = {
-                "id": f"ical:{feed['id']}:{raw.get('UID', (title, {}))[0]}:{start.isoformat()}",
-                "title": title, "start": start.isoformat(), "end": end.isoformat(),
-                "timeLabel": "All day" if all_day else start.strftime("%-I:%M %p"),
-                "allDay": all_day, "isNow": start <= datetime.now().astimezone() < end,
-                "accountId": f"ical:{feed['id']}", "accountLabel": feed.get("name", "iCalendar"),
-                "calendarId": feed["id"], "calendarLabel": feed.get("name", "iCalendar"),
-                "priority": feed.get("priority", "normal"), "color": "",
-                "joinUrl": meeting_url({"location": location, "description": description + " " + url}),
-                "htmlLink": url if url.startswith("https://") else "", "attendees": [],
-                "organizer": {}, "creator": {}, "description": description,
-                "location": location, "recurringEventId": raw.get("UID", ("", {}))[0],
-                "status": "confirmed", "guestCount": 0,
-            }
-            output.append(synthetic)
-    return output
 
 
 def request_json(url: str, token: str | None = None, data: dict | None = None) -> dict:
@@ -438,9 +125,6 @@ def calendar_enabled(account_id: str, calendar_id: str, prefs: dict | None = Non
 
 
 def set_calendar_enabled(account_id: str, calendar_id: str, enabled: bool) -> None:
-    if account_id.startswith("ical:"):
-        update_feed(calendar_id, enabled=enabled)
-        return
     prefs = preferences()
     prefs.setdefault("calendars", {}).setdefault(account_id, {})[calendar_id] = enabled
     save_preferences(prefs)
@@ -455,34 +139,17 @@ def calendar_priority(account_id: str, calendar_id: str, prefs: dict | None = No
 def set_calendar_priority(account_id: str, calendar_id: str, priority: str) -> None:
     if priority not in PRIORITIES:
         raise ValueError(f"unsupported calendar priority: {priority}")
-    if account_id.startswith("ical:"):
-        update_feed(calendar_id, priority=priority)
-        return
     prefs = preferences()
     prefs.setdefault("priorities", {}).setdefault(account_id, {})[calendar_id] = priority
     save_preferences(prefs)
 
 
 def set_account_calendars_enabled(account_id: str, calendar_ids: list[str], enabled: bool) -> None:
-    if account_id.startswith("ical:"):
-        for calendar_id in calendar_ids:
-            update_feed(calendar_id, enabled=enabled)
-        return
     prefs = preferences()
     account_prefs = prefs.setdefault("calendars", {}).setdefault(account_id, {})
     for calendar_id in calendar_ids:
         account_prefs[calendar_id] = enabled
     save_preferences(prefs)
-
-
-def update_feed(feed_id: str, **changes: object) -> None:
-    items = feeds()
-    for item in items:
-        if item.get("id") == feed_id:
-            item.update(changes)
-            save_feeds(items)
-            return
-    raise ValueError(f"unknown iCalendar source: {feed_id}")
 
 
 def store_token(account_id: str, token: str) -> None:
@@ -628,13 +295,6 @@ def list_calendars() -> dict:
                 })
         except Exception as exc:
             result["errors"].append({"accountId": account["id"], "message": str(exc)})
-    for feed in feeds():
-        result["calendars"].append({
-            "accountId": f"ical:{feed['id']}", "accountLabel": "iCalendar subscriptions",
-            "calendarId": feed["id"], "calendarLabel": feed.get("name", "Calendar"),
-            "primary": True, "enabled": feed.get("enabled", True),
-            "priority": feed.get("priority", "normal"), "sourceType": "ical",
-        })
     result["calendars"].sort(key=lambda item: (item["accountLabel"].lower(), not item["primary"], item["calendarLabel"].lower()))
     return result
 
@@ -723,16 +383,6 @@ def build_agenda(day: date) -> dict:
         except Exception as exc:
             result["errors"].append({"accountId": account["id"], "message": str(exc)})
 
-    for feed in [item for item in feeds() if item.get("enabled", True)]:
-        account_id = f"ical:{feed['id']}"
-        result["accounts"].append({"id": account_id, "label": feed.get("name", "iCalendar"),
-                                   "sourceType": "ical"})
-        try:
-            result["events"].extend(ical_events(feed, day))
-        except Exception as exc:
-            result["errors"].append({"accountId": account_id,
-                                     "message": f"{feed.get('name', 'iCalendar')}: {exc}"})
-
     if tasks:
         with ThreadPoolExecutor(max_workers=min(8, len(tasks))) as executor:
             pending = {
@@ -816,14 +466,6 @@ def main() -> None:
     account_commands = account.add_subparsers(dest="account_command", required=True)
     account_commands.add_parser("add")
     account_commands.add_parser("list")
-    source = commands.add_parser("source")
-    source_commands = source.add_subparsers(dest="source_command", required=True)
-    source_add = source_commands.add_parser("add")
-    source_add.add_argument("source", help="https/webcal URL or local .ics file")
-    source_add.add_argument("--name")
-    source_commands.add_parser("list")
-    source_remove = source_commands.add_parser("remove")
-    source_remove.add_argument("id")
     calendar = commands.add_parser("calendar")
     calendar_commands = calendar.add_subparsers(dest="calendar_command", required=True)
     calendar_commands.add_parser("list")
@@ -851,14 +493,6 @@ def main() -> None:
         add_account()
     elif args.command == "account":
         print(json.dumps({"accounts": accounts()}, indent=2))
-    elif args.command == "source" and args.source_command == "add":
-        print(json.dumps(add_feed(args.source, args.name), indent=2))
-    elif args.command == "source" and args.source_command == "list":
-        public = [{key: value for key, value in item.items() if key != "source"} for item in feeds()]
-        print(json.dumps({"sources": public}, indent=2))
-    elif args.command == "source":
-        remove_feed(args.id)
-        print(json.dumps({"removed": args.id}))
     elif args.command == "calendar" and args.calendar_command == "list":
         print(json.dumps(list_calendars(), indent=2))
     elif args.command == "calendar" and args.calendar_command == "set":
